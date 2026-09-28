@@ -1,0 +1,51 @@
+name: Проверка сервера
+
+on:
+  push:
+    branches: [main]
+    paths: ["server/**", "web/**", "tools/**", ".github/workflows/server.yml"]
+  pull_request:
+    paths: ["server/**", "web/**", "tools/**", ".github/workflows/server.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: server-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - name: Зависимости (только по хэшам)
+        run: pip install --require-hashes --no-deps -r server/requirements-dev.lock
+      - name: Известные уязвимости
+        run: pip-audit --require-hashes --strict -r server/requirements.lock
+      - name: Тесты
+        working-directory: server
+        run: python -m pytest -q
+      - name: Миграции совпадают со схемой
+        working-directory: server
+        env:
+          SIMPAD_DATABASE_URL: sqlite:///./ci.db
+        run: |
+          alembic upgrade head
+          alembic check
+      - name: Настройки развёртывания (digest образов, mTLS, закрытая сеть)
+        run: python3 tools/ci_check_deploy.py
+      - name: SBOM сервера
+        run: pip-audit --require-hashes -r server/requirements.lock --format cyclonedx-json -o sbom-server.cdx.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sbom-server
+          path: sbom-server.cdx.json
+          retention-days: 90

@@ -1,0 +1,8 @@
+[Unit]
+Description=Единое окно: оповещение о сбое %i
+
+[Service]
+Type=oneshot
+User=ubuntu
+EnvironmentFile=/etc/simpad/ops.env
+ExecStart=/bin/bash /home/ubuntu/okno/tools/alert.sh "сбой службы %i — смотрите journalctl -u %i"

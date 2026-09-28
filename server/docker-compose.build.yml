@@ -1,0 +1,8 @@
+# Только учебный сервер: сборка образа API прямо на сервере (без выпуска GitHub).
+#   docker compose --env-file .env -f docker-compose.yml -f docker-compose.build.yml up -d --build
+services:
+  api:
+    image: simpad-api:training-local
+    build:
+      context: ..
+      dockerfile: server/Dockerfile

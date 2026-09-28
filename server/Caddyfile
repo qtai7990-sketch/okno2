@@ -1,0 +1,77 @@
+# Два адреса:
+#   SIMPAD_DOMAIN      — планшеты стойки и администратор (обычный HTTPS)
+#   SIMPAD_BANK_DOMAIN — только банки: взаимный TLS (сертификат банка обязателен) + список IP банков
+
+{
+	# Сертификаты только Let's Encrypt: приложение планшета закрепляет корни ISRG Root X1/X2 (pin-set).
+	# Резервный выпуск через другой удостоверяющий центр сломал бы закрепление — поэтому он отключён.
+	cert_issuer acme
+}
+
+(security_headers) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+		Content-Security-Policy "default-src 'self'; img-src 'self' data: blob:; style-src 'self'; font-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+		-Server
+	}
+}
+
+{$SIMPAD_DOMAIN} {
+	import security_headers
+	encode gzip
+	request_body {
+		max_size 8MB
+	}
+
+	@admin_blocked {
+		path /admin/*
+		not remote_ip {$SIMPAD_ADMIN_IPS}
+	}
+
+	# Банковский контур на этом адресе закрыт полностью
+	handle /bank/* {
+		respond 404
+	}
+	handle @admin_blocked {
+		respond 404
+	}
+	handle {
+		reverse_proxy api:8000 {
+			# клиент не может подделать заголовок сертификата банка
+			header_up -X-Client-Cert-Sha256
+		}
+	}
+}
+
+{$SIMPAD_BANK_DOMAIN} {
+	import security_headers
+	tls {
+		client_auth {
+			mode require_and_verify
+			trust_pool file /etc/caddy/bank-ca.pem
+		}
+	}
+
+	request_body {
+		max_size 1MB
+	}
+
+	@bank_allowed {
+		path /bank/*
+		remote_ip {$SIMPAD_BANK_IPS}
+	}
+
+	handle @bank_allowed {
+		reverse_proxy api:8000 {
+			# SHA-256 сертификата клиента; сервер сверяет его с отпечатком, закреплённым за банком
+			header_up X-Client-Cert-Sha256 {http.request.tls.client.fingerprint}
+		}
+	}
+	handle {
+		respond 404
+	}
+}

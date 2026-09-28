@@ -1,0 +1,9 @@
+[Unit]
+Description=Единое окно: проверка резервной копии (свежесть, контрольная сумма, копия в хранилище)
+OnFailure=simpad-alert@%n.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+EnvironmentFile=/etc/simpad/ops.env
+ExecStart=/bin/bash /home/ubuntu/okno/tools/backup_check.sh

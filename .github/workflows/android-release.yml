@@ -1,0 +1,93 @@
+name: Рабочая сборка планшета (PRODUCTION)
+
+# Только подписанная рабочая сборка, только по тегу версии v…. Создавать теги v… может только ответственный
+# (правило тегов в GitHub: Settings → Rules → Rulesets); дополнительно проверяется список SIMPAD_RELEASE_ACTORS.
+# Секреты — в окружении production (при тарифе Enterprise дополнительно включить Required reviewers).
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    environment: production
+    env:
+      SIMPAD_SERVER_URL: ${{ vars.SIMPAD_SERVER_URL }}
+      SIMPAD_CERT_PINS: ${{ vars.SIMPAD_CERT_PINS }}
+    steps:
+      - name: Выпуск разрешён только ответственным
+        env:
+          ALLOWED: ${{ vars.SIMPAD_RELEASE_ACTORS }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          [ -n "$ALLOWED" ] || { echo "Не задан SIMPAD_RELEASE_ACTORS"; exit 1; }
+          echo ",$ALLOWED," | tr -d ' ' | grep -q ",$ACTOR," || { echo "$ACTOR не может выпускать версии"; exit 1; }
+      - name: Проверка обязательных настроек (без них сборка не выпускается)
+        env:
+          EXPECTED_CERT: ${{ vars.SIMPAD_SIGNING_CERT_SHA256 }}
+          KS: ${{ secrets.SIMPAD_KEYSTORE_B64 }}
+          KP: ${{ secrets.SIMPAD_KEYSTORE_PASSWORD }}
+          KA: ${{ secrets.SIMPAD_KEY_ALIAS }}
+          KK: ${{ secrets.SIMPAD_KEY_PASSWORD }}
+        run: |
+          missing=""
+          for v in KS KP KA KK SIMPAD_SERVER_URL SIMPAD_CERT_PINS EXPECTED_CERT; do [ -n "${!v}" ] || missing="$missing $v"; done
+          if [ -n "$missing" ]; then echo "Не заданы:$missing"; exit 1; fi
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: gradle/actions/wrapper-validation@748248ddd2a24f49513d8f472f81c3a07d4d50e1 # v4.4.4
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+        with:
+          packages: "platform-tools platforms;android-34 build-tools;34.0.0"
+      - name: Зависимости зафиксированы (без них сборка запрещена)
+        run: |
+          for f in android/gradle/verification-metadata.xml android/app/gradle.lockfile; do
+            [ -s "$f" ] || { echo "Нет $f"; exit 1; }
+          done
+      - uses: gradle/actions/setup-gradle@748248ddd2a24f49513d8f472f81c3a07d4d50e1 # v4.4.4
+      - name: Подписанная рабочая сборка
+        working-directory: android
+        env:
+          SIMPAD_KEYSTORE_B64: ${{ secrets.SIMPAD_KEYSTORE_B64 }}
+          SIMPAD_KEYSTORE_PASSWORD: ${{ secrets.SIMPAD_KEYSTORE_PASSWORD }}
+          SIMPAD_KEY_ALIAS: ${{ secrets.SIMPAD_KEY_ALIAS }}
+          SIMPAD_KEY_PASSWORD: ${{ secrets.SIMPAD_KEY_PASSWORD }}
+        run: |
+          echo "$SIMPAD_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/simpad.jks"
+          export SIMPAD_KEYSTORE_PATH="$RUNNER_TEMP/simpad.jks"
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleProdRelease
+      - name: Удалить ключ подписи с машины сборки
+        if: always()
+        run: rm -f "$RUNNER_TEMP/simpad.jks"
+      - name: Проверка подписи и контрольные суммы
+        env:
+          EXPECTED_CERT: ${{ vars.SIMPAD_SIGNING_CERT_SHA256 }}
+        run: |
+          apksigner="$ANDROID_HOME/build-tools/34.0.0/apksigner"
+          apk="$(ls android/app/build/outputs/apk/prod/release/*.apk)"
+          "$apksigner" verify --verbose --print-certs "$apk" | tee verify.txt
+          want="$(echo "$EXPECTED_CERT" | tr -d ':' | tr 'A-F' 'a-f')"
+          got="$(grep -m1 'certificate SHA-256 digest' verify.txt | awk '{print $NF}')"
+          [ "$got" = "$want" ] || { echo "Сертификат подписи $got не совпадает с утверждённым $want"; exit 1; }
+          mkdir out && cp "$apk" "out/OKNO-PRODUCTION-${GITHUB_REF_NAME}.apk" && cp verify.txt out/
+          echo "versionCode: $GITHUB_RUN_NUMBER" > out/VERSION.txt
+          (cd out && sha256sum *.apk > SHA256SUMS.txt)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: OKNO-PRODUCTION-signed-apk
+          path: out/
+          retention-days: 90

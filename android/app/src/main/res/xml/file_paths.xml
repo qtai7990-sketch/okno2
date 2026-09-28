@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Временные фото бланков согласий: только кэш приложения, удаляются сразу после отправки -->
+<paths>
+    <cache-path name="consent" path="consent/" />
+</paths>

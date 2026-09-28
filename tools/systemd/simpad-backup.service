@@ -1,0 +1,12 @@
+[Unit]
+Description=Единое окно: зашифрованная резервная копия базы
+After=docker.service
+Requires=docker.service
+OnFailure=simpad-alert@%n.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+# SIMPAD_BACKUP_GPG, SIMPAD_BACKUP_BUCKET, AWS_SHARED_CREDENTIALS_FILE, SIMPAD_ALERT_TG_* — в файле ниже (права 600)
+EnvironmentFile=/etc/simpad/ops.env
+ExecStart=/bin/bash /home/ubuntu/okno/tools/backup.sh

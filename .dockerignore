@@ -1,0 +1,18 @@
+# Контекст сборки образа сервера: только нужное; секреты и ключи не попадают даже во временный контекст
+**/.env
+**/*.env
+**/*.pem
+**/*.key
+**/*.csr
+**/*.jks
+**/*.keystore
+**/*.p12
+okno-pki/
+okno-keystore/
+**/__pycache__/
+**/.pytest_cache/
+**/*.db
+android/
+docs/
+.github/
+tools/

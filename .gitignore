@@ -1,0 +1,19 @@
+.env
+*.db
+__pycache__/
+.pytest_cache/
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+*.jks
+*.keystore
+
+# ключи и сертификаты — никогда в репозиторий
+okno-pki/
+okno-keystore/
+server/bank-ca.pem
+*.jks
+*.key
+*.csr
+android/app/generated-nsc/

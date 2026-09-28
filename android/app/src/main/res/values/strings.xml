@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Единое окно</string>
+    <string name="restriction_device_key">Ключ планшета</string>
+    <string name="restriction_device_key_desc">Выдаётся командой bash adm.sh device-add на сервере</string>
+    <string name="restriction_printer_mac">Принтер талонов: адрес Bluetooth</string>
+    <string name="restriction_printer_mac_desc">Например 00:11:22:33:44:55. Рабочая сборка печатает только на этот принтер</string>
+    <string name="restriction_printer_name">Принтер талонов: название для экрана</string>
+    <string name="restriction_printer_dots">Принтер талонов: ширина печати в точках</string>
+    <string name="restriction_printer_dots_desc">576 — бумага 80 мм, 384 — бумага 58 мм</string>
+</resources>

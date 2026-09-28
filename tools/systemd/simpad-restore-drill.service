@@ -1,0 +1,10 @@
+[Unit]
+Description=Единое окно: учебное восстановление последней копии (только на машине восстановления, не на рабочем сервере)
+After=docker.service
+OnFailure=simpad-alert@%n.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+EnvironmentFile=/etc/simpad/drill.env
+ExecStart=/bin/bash /home/ubuntu/okno/tools/restore_drill.sh

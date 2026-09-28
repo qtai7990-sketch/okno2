@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<restrictions xmlns:android="http://schemas.android.com/apk/res/android">
+    <restriction
+        android:key="device_key"
+        android:title="@string/restriction_device_key"
+        android:description="@string/restriction_device_key_desc"
+        android:restrictionType="string" />
+    <restriction
+        android:key="printer_mac"
+        android:title="@string/restriction_printer_mac"
+        android:description="@string/restriction_printer_mac_desc"
+        android:restrictionType="string" />
+    <restriction
+        android:key="printer_name"
+        android:title="@string/restriction_printer_name"
+        android:restrictionType="string" />
+    <restriction
+        android:key="printer_dots"
+        android:title="@string/restriction_printer_dots"
+        android:description="@string/restriction_printer_dots_desc"
+        android:restrictionType="integer"
+        android:defaultValue="576" />
+</restrictions>

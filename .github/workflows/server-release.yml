@@ -1,0 +1,80 @@
+name: Выпуск образа сервера (PRODUCTION)
+
+# По тегу версии v…: образ сервера собирается здесь, в GitHub, публикуется в реестр по digest,
+# получает список компонентов (SBOM) и подпись sigstore без ключей (подтверждает: собран этим workflow по тегу).
+# На рабочем сервере ничего не собирается: tools/update.sh проверяет подпись и запускает образ по digest.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: server-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: production
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - name: Выпуск разрешён только ответственным (переменная SIMPAD_RELEASE_ACTORS)
+        env:
+          ALLOWED: ${{ vars.SIMPAD_RELEASE_ACTORS }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          [ -n "$ALLOWED" ] || { echo "Не задан SIMPAD_RELEASE_ACTORS"; exit 1; }
+          echo ",$ALLOWED," | tr -d ' ' | grep -q ",$ACTOR," || { echo "$ACTOR не может выпускать версии"; exit 1; }
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Имя образа
+        id: img
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/simpad-api" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Сборка и публикация
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: server/Dockerfile
+          push: true
+          tags: ${{ steps.img.outputs.name }}:${{ github.ref_name }}
+          provenance: mode=max
+          sbom: true
+      - uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          image: ${{ steps.img.outputs.name }}@${{ steps.build.outputs.digest }}
+          format: cyclonedx-json
+          output-file: sbom-server-image.cdx.json
+          upload-artifact: false
+      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+        with:
+          cosign-release: v2.6.5
+      - name: Подпись образа (sigstore, без ключей)
+        env:
+          REF: ${{ steps.img.outputs.name }}@${{ steps.build.outputs.digest }}
+        run: |
+          cosign sign --yes "$REF"
+          cosign attest --yes --type cyclonedx --predicate sbom-server-image.cdx.json "$REF"
+          echo "$REF" > release-digest.txt
+          { echo "### Образ сервера ${GITHUB_REF_NAME}"; echo '```'; echo "$REF"; echo '```';
+            echo "На сервере: bash tools/update.sh ${GITHUB_REF_NAME} $REF"; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: server-release-${{ github.ref_name }}
+          path: |
+            release-digest.txt
+            sbom-server-image.cdx.json
+          retention-days: 90
