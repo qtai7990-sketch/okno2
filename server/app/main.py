@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import delete, or_, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session as DbSession
 
 from . import rules
@@ -31,7 +31,7 @@ from .models import (Audit, Bank, BankNonce, Case, Consent, ConsentText, Correct
 from .queue import SERIES, Queue
 from .services import Svc, aware
 
-VERSION = "0.2.7"
+VERSION = "0.2.8"
 MAX_SKEW_SEC = 300
 NONCE_RE = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
 IDEM_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
@@ -101,6 +101,7 @@ class StepIn(BaseModel):
     status: Literal["todo", "work", "done", "fail"]
     note: str = Field(default="", max_length=500)
     imei: str | None = Field(default=None, max_length=15)
+    doc: str = Field(default="", max_length=40)  # номер подтверждающего документа для «выполнено»
 
 
 class ClaimIn(BaseModel):
@@ -249,6 +250,7 @@ class BankPatch(BaseModel):
     cert_fingerprint: str | None = Field(default=None, max_length=100)
     active: bool | None = None
     window: str | None = Field(default=None, pattern=r"^[0-9A-Za-z-]{0,8}$")
+    snils_channel: Literal["bank", "sfr"] | None = None
 
 
 class PolicyIn(BaseModel):
@@ -425,7 +427,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except IntegrityError:
             s.rollback()
             raise HTTPException(401, "Повтор запроса: X-Nonce уже использован")
+        mark_seen(s, bank.id, now)
         return bank, body
+
+    def mark_seen(s: DbSession, bank_id: str, now: datetime) -> None:
+        """Время последнего подписанного запроса банка — для индикатора связи на стойке. Не влияет на обработку."""
+        try:
+            row = s.get(Setting, f"bank_seen:{bank_id}")
+            if row:
+                if now - datetime.fromisoformat(row.value["at"]) < timedelta(seconds=60):
+                    return  # не чаще раза в минуту: индикатору достаточно, лишних записей в базу нет
+                row.value = {"at": now.isoformat()}
+            else:
+                s.add(Setting(key=f"bank_seen:{bank_id}", value={"at": now.isoformat()}))
+            s.commit()
+        except SQLAlchemyError:  # индикатор не должен ломать запрос банка (одновременная запись, занятая база)
+            s.rollback()
 
     # ----- служебное -----
     @app.get("/healthz")
@@ -517,10 +534,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         out = [{"id": b.id, "name": b.name, "legal_name": b.legal_name, "sim_brand": b.sim_brand, "mode": b.mode,
                 "open_from": b.open_from, "open_to": b.open_to, "open_now": rules.is_open(h, (b.open_from, b.open_to)),
                 "hours": rules.span_text((b.open_from, b.open_to)),
-                "sim_authority_confirmed": b.sim_authority_confirmed}
+                "sim_authority_confirmed": b.sim_authority_confirmed, "snils_channel": sv.snils_channel(b.id),
+                **sv.bank_link(b)}
                for b in sv.db.scalars(select(Bank).where(Bank.active.is_(True)).order_by(Bank.name))]
         return {"banks": out, "notary": {"open_from": notary[0], "open_to": notary[1], "open_now": notary[0] <= h < notary[1]},
-                "hour": round(h, 2)}
+                "hour": round(h, 2), "services_off": sv.services_off(), "demo": settings.allow_demo_scan}
 
     @app.get("/api/v1/cases")
     def list_cases(w: Who = Depends(operator), sv: Svc = Depends(svc), include_closed: bool = False):
@@ -597,7 +615,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/v1/cases/{case_id}/steps/{key}")
     def step(case_id: str, key: str, body: StepIn, w: Who = Depends(operator), sv: Svc = Depends(svc)):
         c = sv.get_case(case_id, w.stand_id)
-        sv.operator_step(c, key, body.status, body.note, w.actor, imei=body.imei)
+        sv.operator_step(c, key, body.status, body.note, w.actor, imei=body.imei, doc=body.doc)
         sv.db.flush()
         return sv.view(c)
 
@@ -877,9 +895,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if not re.fullmatch(r"[0-9a-f]{64}", fp):
                 raise HTTPException(422, "Отпечаток сертификата — SHA-256, 64 шестнадцатеричных символа")
             data["cert_fingerprint"] = fp
+        ch = data.pop("snils_channel", None)
+        if ch:
+            row = s.get(Setting, "snils_channel")
+            cur = dict(row.value) if row else {}
+            cur[bank_id] = ch
+            if row:
+                row.value = cur
+            else:
+                s.add(Setting(key="snils_channel", value=cur))
         for k, v in data.items():
             setattr(b, k, v)
-        s.add(Audit(actor="admin", action="bank.patch", detail=f"{bank_id}: {', '.join(data)}"))
+        s.add(Audit(actor="admin", action="bank.patch", detail=f"{bank_id}: {', '.join([*data, *(['snils_channel=' + ch] if ch else [])])}"))
         return {"ok": True}
 
     @app.put("/admin/v1/policies", dependencies=[Depends(admin)])
@@ -953,6 +980,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         else:
             s.add(Setting(key="notary_hours", value=hours))
         return {"ok": True}
+
+    @app.put("/admin/v1/settings/services_off", dependencies=[Depends(admin)])
+    def services_off(items: list[str], s: DbSession = Depends(db, scope="function")):
+        bad = [x for x in items if x not in rules.SWITCHABLE]
+        if bad:
+            raise HTTPException(422, f"Неизвестные услуги: {', '.join(bad)}. Можно: {', '.join(rules.SWITCHABLE)}")
+        val = sorted(set(items))
+        row = s.get(Setting, "services_off")
+        if row:
+            row.value = val
+        else:
+            s.add(Setting(key="services_off", value=val))
+        s.add(Audit(actor="admin", action="settings.services_off", detail=",".join(val) or "—"))
+        return {"ok": True, "services_off": val}
 
     @app.get("/admin/v1/audit", dependencies=[Depends(admin)])
     def audit(case_id: str | None = None, limit: int = 200, s: DbSession = Depends(db, scope="function")):

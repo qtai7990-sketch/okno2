@@ -8,8 +8,8 @@ plugins {
 }
 
 val runNumber = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
-// Версия программы (совпадает с сервером) + номер сборки GitHub: «0.2.7+15». versionCode — номер сборки.
-val appVersion = "0.2.7"
+// Версия программы (совпадает с сервером) + номер сборки GitHub: «0.2.8+15». versionCode — номер сборки.
+val appVersion = "0.2.8"
 val keystorePath: String? = System.getenv("SIMPAD_KEYSTORE_PATH")
 
 // Рабочая сборка: адрес сервера и закреплённые сертификаты зашиваются при сборке (переменные GitHub).

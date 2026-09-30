@@ -58,11 +58,6 @@ class NativeBridge(private val activity: MainActivity) {
     }
 
     @JavascriptInterface
-    fun takePhoto(reqId: String) {
-        activity.startPhoto(reqId)
-    }
-
-    @JavascriptInterface
     fun print() {
         activity.printPage()
     }

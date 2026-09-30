@@ -1,4 +1,4 @@
-# Развёртывание сервера «Единого окна» (демонстрационный прототип v0.2.7)
+# Развёртывание сервера «Единого окна» (демонстрационный прототип v0.2.8)
 
 Учебный сервер можно поднять сразу. Рабочий — только после условий из README, раздел «До пилота».
 
@@ -49,7 +49,7 @@ python3 tools/genkeys.py server/.env okno.simpad.ru bank-okno.simpad.ru --produc
 bash tools/install_cosign.sh
 echo "<токен GitHub: classic, только read:packages>" | docker login ghcr.io -u <логин GitHub> --password-stdin
 export SIMPAD_GITHUB_REPO=<организация>/okno
-bash tools/update.sh v0.2.7 ghcr.io/<организация>/simpad-api@sha256:<digest из выпуска>
+bash tools/update.sh v0.2.8 ghcr.io/<организация>/simpad-api@sha256:<digest из выпуска>
 ```
 При старте сервер применяет миграции схемы. Через 1–2 минуты `https://okno.simpad.ru/healthz` отвечает `{"ok": true, "db": true, ...}` (проверка включает запрос к базе).
 
@@ -121,7 +121,7 @@ bash adm.sh text-approve 1 "Иванов И.И., приказ № 12 от 05.10.
 | Variable | `SIMPAD_CERT_PINS` | `C5+lpZ7tcVwmwQIMcRtPbsQtWLABXhQzejna0wHFr8M=,diGVwiVYbubAI3RW4hB9xU8e/CH2GnkuvVFZE8zmgzI=` — корни Let's Encrypt ISRG Root X1 и X2 |
 | Variable | `SIMPAD_RELEASE_ACTORS` | логин(ы) GitHub ответственного через запятую |
 
-**Выпуск версии:** ответственный создаёт тег `v0.2.7` (Releases → Draft a new release). Автоматически запускаются:
+**Выпуск версии:** ответственный создаёт тег `v0.2.8` (Releases → Draft a new release). Автоматически запускаются:
 - «Выпуск образа сервера (PRODUCTION)» — образ в реестре GitHub по digest, SBOM, подпись sigstore; digest — в итогах запуска и в `release-digest.txt`;
 - «Рабочая сборка планшета (PRODUCTION)» — подписанный APK, сверка сертификата подписи, `SHA256SUMS.txt`, `VERSION.txt` (versionCode).
 
@@ -178,11 +178,11 @@ sudo systemctl daemon-reload && sudo systemctl enable --now simpad-restore-drill
 
 ```bash
 cd ~/okno && export SIMPAD_GITHUB_REPO=<организация>/okno
-bash tools/update.sh v0.2.7 ghcr.io/<организация>/simpad-api@sha256:<digest из итогов выпуска>
+bash tools/update.sh v0.2.8 ghcr.io/<организация>/simpad-api@sha256:<digest из итогов выпуска>
 ```
 Скрипт: проверяет подпись образа (sigstore: подписан workflow выпуска этого репозитория по тегу `v…`), делает резервную копию базы, переключает файлы конфигурации на тег, запускает образ по digest, ждёт «здоров». Не поднялся — оповещение и команды отката (раздел 8 — восстановление данных).
 
-## 10. Электронная очередь: талоны, поясной принтер, табло (v0.2.6–v0.2.7)
+## 10. Электронная очередь: талоны, поясной принтер, табло (v0.2.6–v0.2.8)
 
 Схема: планшет зала выдаёт талон (язык клиента + номер, персональных данных нет) → поясной принтер печатает талон с QR →
 на входе в офис талон сканируют (очередь — по времени прихода) → табло вызывает «А317 → Стойка 7» голосом →

@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import re
 import secrets
 import string
 import uuid
@@ -15,6 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from . import rules
+from .memo import EAEU
 from .config import Settings
 from .crypto import DataCipher, hmac_hex, sha256b
 from .models import (Audit, Bank, BankEvent, Case, Consent, ConsentText, Correction, DocPolicy, HandoffToken,
@@ -32,6 +34,16 @@ def png_ok(raw: bytes) -> bool:
         return False
     w, h = struct.unpack(">II", raw[16:24])
     return 50 <= w <= 5000 and 30 <= h <= 5000
+
+
+def snils_ok(d: str) -> bool:
+    """Контрольное число СНИЛС (для номеров больше 001-001-998)."""
+    n = int(d[:9])
+    if n <= 1001998:
+        return True
+    s = sum(int(x) * (9 - i) for i, x in enumerate(d[:9]))
+    s = s % 101
+    return (0 if s == 100 else s) == int(d[9:])
 
 
 def aware(dt: datetime | None) -> datetime | None:
@@ -64,6 +76,21 @@ class Svc:
         row = self.db.get(Setting, key)
         return row.value if row else default
 
+    def snils_channel(self, bank_id: str | None) -> str:
+        return (self.setting("snils_channel", {}) or {}).get(bank_id or "", "bank")
+
+    def case_snils_channel(self, case: Case) -> str:
+        """Канал СНИЛС фиксируется в обращении при передаче в банк: смена настройки банка
+        не меняет уже переданные обращения (иначе события банка по ним начнут отклоняться)."""
+        fixed = (case.opts or {}).get("snils_channel")
+        return fixed if case.sent_at and fixed in rules.SNILS_CHANNELS else self.snils_channel(case.bank_id)
+
+    def _fix_snils_channel(self, case: Case) -> None:
+        case.opts = {**(case.opts or {}), "snils_channel": self.snils_channel(case.bank_id)}
+
+    def services_off(self) -> list[str]:
+        return [x for x in (self.setting("services_off", []) or []) if x in rules.SWITCHABLE]
+
     def get_case(self, case_id: str, stand_id: str | None = None) -> Case:
         case = self.db.get(Case, case_id)
         if not case or (stand_id and case.stand_id != stand_id):
@@ -82,7 +109,7 @@ class Svc:
         """Номер обращения выдаётся вставкой с проверкой уникальности в базе; при совпадении — новая попытка."""
         for _ in range(5):
             case = Case(id=str(uuid.uuid4()), number=self._new_number(), stand_id=stand_id,
-                        opts={"dms": True, "transfer": False, "phone": False},
+                        opts={"dms": "dms" not in self.services_off(), "transfer": False, "phone": False},
                         pay={"dms": "mir", "sim": "bankcard"})
             self.db.add(case)
             try:
@@ -258,6 +285,14 @@ class Svc:
                     c.revoked_at = utcnow()
                     self.audit(actor, "consent.revoke", case.id, "bank; причина: смена банка")
             self._cancel_tokens(case)
+        off = self.services_off()
+        if data.get("pkg") and data["pkg"] != case.pkg:
+            need = {"card": ["card"], "sim": ["sim"], "full": ["card", "sim"]}[data["pkg"]]
+            if any(x in off for x in need):
+                raise HTTPException(409, "Этот пакет сейчас не оформляется: нет договора с исполнителем")
+        for k, v in (data.get("opts") or {}).items():
+            if v and k in off and not (case.opts or {}).get(k):
+                raise HTTPException(409, "Эта услуга сейчас не оформляется: нет договора с исполнителем")
         if "pay" in data:
             for svc, m in data["pay"].items():
                 if svc not in ("dms", "sim") or m not in rules.PAY_METHODS:
@@ -266,7 +301,7 @@ class Svc:
             if k in data:
                 setattr(case, k, data[k])
         if "opts" in data:
-            case.opts = {**case.opts, **{k: bool(v) for k, v in data["opts"].items() if k in ("dms", "transfer", "phone")}}
+            case.opts = {**case.opts, **{k: bool(v) for k, v in data["opts"].items() if k in ("dms", "transfer", "phone")}}  # snils_channel не трогается
         if "pay" in data:
             case.pay = {**case.pay, **data["pay"]}
         self.audit(actor, "case.update", case.id, json.dumps({k: v for k, v in data.items() if k != "lang"}, ensure_ascii=False))
@@ -290,24 +325,29 @@ class Svc:
         bank = self.db.get(Bank, case.bank_id) if case.bank_id else None
         notary = self.setting("notary_hours", [9, 20])
         opts = dict(case.opts)
-        opts["patent_hint"] = case.purpose == "patent"
+        # граждане ЕАЭС работают без патента — подсказка про ДМС для патента им не нужна
+        opts["patent_hint"] = case.purpose == "patent" and (case.country or "") not in EAEU
         return rules.Ctx(pkg=case.pkg, opts=opts, pay=case.pay or {}, has_ru_text=case.has_ru_text,
                          doc_rules={k: v["rule"] for k, v in self.doc_rules(case).items()},
                          card_state=case.card_state, consents=self.active_consents(case),
                          status={s.key: s.status for s in case.steps}, bank_name=bank.name if bank else None,
                          bank_mode=bank.mode if bank else None, bank_open=(bank.open_from, bank.open_to) if bank else None,
                          notary_open=(notary[0], notary[1]), hour=self.hour_now(), sent=bool(case.sent_at),
-                         online=online, scanned=bool(case.passport_enc and case.migcard_enc))
+                         online=online, scanned=bool(case.passport_enc and case.migcard_enc),
+                         snils_channel=self.case_snils_channel(case))
 
     def view(self, case: Case) -> dict:
         ctx = self.ctx(case)
         steps = []
         for k in rules.steps_for(ctx):
             st = next((s for s in case.steps if s.key == k), None)
-            steps.append({"key": k, **rules.STEPS[k], "status": st.status if st else "todo",
+            own = rules.owner(ctx, k)
+            steps.append({"key": k, **rules.STEPS[k], "owner": own, "auto": own == "bank",
+                          "doc_label": rules.DOC_STEPS.get(k, "") if rules.operator_can_mark(ctx, k) else "",
+                          "status": st.status if st else "todo",
                           "note": self._note(st.note) if st else "", "source": st.source if st else "",
                           "updated_at": aware(st.updated_at).isoformat() if st else None,
-                          "blockers": rules.blockers(ctx, k), "operator_can_mark": k in rules.OPERATOR_STEPS})
+                          "blockers": rules.blockers(ctx, k), "operator_can_mark": rules.operator_can_mark(ctx, k)})
         dr = self.doc_rules(case)
         corrections = [{"field": c.field, "old": self.c.dec(c.old_enc), "new": self.c.dec(c.new_enc), "reason": c.reason,
                         "at": aware(c.at).isoformat()} for c in self.db.scalars(select(Correction).where(Correction.case_id == case.id))]
@@ -338,7 +378,7 @@ class Svc:
             "claims": claims,
             "steps": steps, "warnings": rules.warnings(ctx), "plan": rules.plan(ctx),
             "corrections": corrections, "closed_at": aware(case.closed_at).isoformat() if case.closed_at else None,
-            "ticket": self._ticket(case),
+            "ticket": self._ticket(case), "snils_channel": ctx.snils_channel, "eaeu": (case.country or "") in EAEU,
         }
 
     def _ticket(self, case: Case) -> dict | None:
@@ -357,12 +397,18 @@ class Svc:
             return "[комментарий не расшифрован]"
 
     # ---------- шаги оператора ----------
-    def operator_step(self, case: Case, key: str, status: str, note: str, actor: str, imei: str | None = None) -> None:
+    def operator_step(self, case: Case, key: str, status: str, note: str, actor: str, imei: str | None = None,
+                      doc: str = "") -> None:
         if key not in rules.STEPS:
             raise HTTPException(400, "Неизвестный шаг")
-        if key not in rules.OPERATOR_STEPS:
-            raise HTTPException(403, "Этот шаг выполняет банк — статус приходит только от банка")
+        if case.closed_at:
+            raise HTTPException(409, "Обращение закрыто")
         ctx = self.ctx(case)
+        if not rules.operator_can_mark(ctx, key):
+            raise HTTPException(403, "Этот шаг выполняет банк — статус приходит только от банка")
+        if key == "snils" and ctx.status.get("snils") == "done":
+            # от подтверждённого СНИЛС зависят принятые события банка (ЕБС, SIM) — отметка не меняется
+            raise HTTPException(409, "СНИЛС уже подтверждён — отметку изменить нельзя")
         if key not in rules.steps_for(ctx):
             raise HTTPException(400, "Шага нет в маршруте клиента")
         if status in ("work", "done"):
@@ -373,8 +419,30 @@ class Svc:
             if not imei or not imei.isdigit() or len(imei) != 15:
                 raise HTTPException(400, "IMEI — 15 цифр")
             case.imei_enc = self.c.enc(imei)
-        self._set_step(case, key, status, "operator", self.c.enc(note) if note else "")
-        self.audit(actor, "step.operator", case.id, f"{key}={status}")
+        note = (note or "").strip()
+        if status == "fail" and len(note) < 5:
+            raise HTTPException(422, "Укажите причину: без неё отметку «не удалось» поставить нельзя")
+        doc = (doc or "").strip()
+        if status == "done" and key in rules.DOC_STEPS:
+            doc = self._check_doc(key, doc)
+            note = f"№ {doc}" + (f" · {note}" if note else "")
+        elif doc:
+            raise HTTPException(422, "Номер документа указывается только вместе с отметкой «выполнено»")
+        self._set_step(case, key, status, "sfr" if key == "snils" else "operator", self.c.enc(note) if note else "")
+        # сам номер документа в журнал не пишем: журнал хранится открытым текстом
+        self.audit(actor, "step.operator", case.id, f"{key}={status}" + ("; документ указан" if doc else ""))
+
+    @staticmethod
+    def _check_doc(key: str, doc: str) -> str:
+        label = rules.DOC_STEPS[key]
+        if key == "snils":
+            d = "".join(ch for ch in doc if ch.isdigit())
+            if len(d) != 11 or not snils_ok(d):
+                raise HTTPException(422, "СНИЛС — 11 цифр с верной контрольной суммой")
+            return "СНИЛС ***-***-" + d[6:9] + " " + d[9:]  # целиком не храним: достаточно для сверки с уведомлением
+        if not re.fullmatch(r"[0-9A-Za-zА-Яа-яЁё№/. -]{3,40}", doc) or not any(ch.isdigit() for ch in doc):
+            raise HTTPException(422, f"{label}: без него отметку «выполнено» поставить нельзя (3–40 символов, с цифрами)")
+        return doc
 
     def operator_claim(self, case: Case, code: str, note: str, actor: str, operator_id: int) -> None:
         """Статус «со слов сотрудника банка». Хранится отдельно и НЕ меняет шаги, KPI и расчёты с банком."""
@@ -454,6 +522,7 @@ class Svc:
             raise HTTPException(409, "Для банка с API передача только через QR и запрос банка")
         self._cancel_tokens(case)
         case.sent_at, case.sent_mode, case.handoff_id = utcnow(), "case", str(uuid.uuid4())
+        self._fix_snils_channel(case)
         self.audit(actor, "handoff.manual", case.id, f"bank={bank.id}")
         return {"ok": True, "case_number": case.number, "handoff_id": case.handoff_id}
 
@@ -484,9 +553,10 @@ class Svc:
         if res.rowcount != 1:
             raise HTTPException(409, "Обращение уже передано в банк")
         self.db.refresh(case)
+        self._fix_snils_channel(case)
         self.audit(f"bank:{bank.id}", "handoff.redeem", case.id, f"mode={bank.mode}")
         body = {"case_id": case.id, "case_number": case.number, "handoff_id": t.handoff_id, "route": case.pkg,
-                "services": [k for k in rules.SERVICES if k in rules.steps_for(self.ctx(case))],
+                "services": [k for k in rules.bank_services_ctx(self.ctx(case)) if k in rules.steps_for(self.ctx(case))],
                 "consent": self._bank_consent_ref(case)}
         if bank.mode == "api":
             p = self.c.dec(case.passport_enc) or {}
@@ -549,6 +619,9 @@ class Svc:
             self._reject(bank.id, ev, body_hash, 409, "bank_case_id не совпадает с ранее присланным по этому обращению")
         self.db.refresh(case)
         svc = rules.CODE_SERVICE.get(code)
+        sfr = self.case_snils_channel(case) == "sfr"
+        if svc == "snils" and sfr:
+            self._reject(bank.id, ev, body_hash, 409, "СНИЛС по этому банку подтверждается через Соцфонд, а не банком")
         if svc and svc not in rules.bank_services(case.pkg):
             self._reject(bank.id, ev, body_hash, 409, f"Услуги «{rules.STEPS[svc]['title']}» нет в маршруте клиента")
         # Предпосылка засчитывается, только если она подтверждена этим же банком И произошла не позже текущего события
@@ -556,7 +629,12 @@ class Svc:
                                 .where(BankEvent.case_id == case.id, BankEvent.bank_id == bank.id)).all()
         limit = occurred + timedelta(seconds=rules.CLOCK_SKEW_SEC)
         missing = [p for p in rules.EVENT_PREREQ.get(code, [])
-                   if not any(c == p and aware(t) <= limit for c, t in prior)]
+                   if not (sfr and p == "ESIA_CONFIRMED") and not any(c == p and aware(t) <= limit for c, t in prior)]
+        if sfr and "ESIA_CONFIRMED" in rules.EVENT_PREREQ.get(code, []):
+            # предпосылку заменяет СНИЛС, подтверждённый сотрудником по уведомлению Соцфонда до этого события
+            sn = next((s for s in case.steps if s.key == "snils"), None)
+            if not sn or sn.status != "done" or aware(sn.updated_at) > limit:
+                missing.append("СНИЛС (Соцфонд)")
         if missing:
             self._reject(bank.id, ev, body_hash, 409,
                          f"Нарушен обязательный порядок: {code} раньше {', '.join(missing)} (по факту получения или по времени occurred_at)")
@@ -611,11 +689,27 @@ class Svc:
                 rejected.append({"event_id": r["event_id"], "reason": e.detail})
         return {"accepted": ok, "duplicate": dup, "rejected": rejected}
 
+    # ---------- связь с банками ----------
+    def bank_link(self, bank: Bank, now: datetime | None = None) -> dict:
+        """Состояние обмена с банком — по последнему подписанному запросу банка или принятому файлу сверки.
+        none — обмена не было ни разу; ok — был за последние 24 часа; wait — был раньше, сейчас тишина."""
+        now = now or utcnow()
+        seen = self.setting(f"bank_seen:{bank.id}", None)
+        last = datetime.fromisoformat(seen["at"]) if seen else None
+        ev = self.db.scalar(select(func.max(BankEvent.received_at)).where(BankEvent.bank_id == bank.id))
+        if ev and (last is None or aware(ev) > last):
+            last = aware(ev)
+        if last is None:
+            return {"link": "none", "link_text": "не подключён", "last_seen": None}
+        if now - last <= timedelta(hours=24):
+            return {"link": "ok", "link_text": "на связи", "last_seen": last.isoformat()}
+        return {"link": "wait", "link_text": "нет обмена больше суток", "last_seen": last.isoformat()}
+
     # ---------- памятка и отчёт ----------
     def memo(self, case: Case, lang: str) -> dict:
         from .memo import build_memo
         bank = self.db.get(Bank, case.bank_id) if case.bank_id else None
-        return build_memo(case, self.view(case), bank.name if bank else None, lang)
+        return build_memo(case, self.view(case), bank.name if bank else None, lang, self.case_snils_channel(case))
 
     def shift_report(self, stand_id: str, day: datetime) -> dict:
         """KPI только по подтверждённым банком событиям. Статусы «со слов банка» показываются отдельно."""
@@ -630,6 +724,7 @@ class Svc:
         want_sim = [c for c in cases if c.pkg in ("sim", "full")]
         sim_done = sum(1 for c in want_sim if (c.id, "SIM_ISSUED") in verified)
         failed = sum(1 for c in cases if any(s.status == "fail" for s in c.steps))
+        no_ticket = sum(1 for c in cases if not c.ticket_id)
         corr = self.db.scalar(select(func.count(Correction.id)).where(Correction.case_id.in_(ids))) or 0
         claims = self.db.scalar(select(func.count(OperatorClaim.id)).where(OperatorClaim.case_id.in_(ids))) or 0
         by_bank: dict[str, dict] = {}
@@ -643,5 +738,5 @@ class Svc:
         return {"date": start.date().isoformat(), "cases": total, "reached_bank": sent,
                 "reached_bank_pct": round(sent / total * 100) if total else 0,
                 "sim_chain_pct": round(sim_done / len(want_sim) * 100) if want_sim else None,
-                "with_failures": failed, "corrections": corr, "unverified_claims": claims, "by_bank": by_bank,
+                "with_failures": failed, "with_ticket": total - no_ticket, "without_ticket": no_ticket, "corrections": corr, "unverified_claims": claims, "by_bank": by_bank,
                 "basis": "только подтверждённые события банка и файлы сверки"}

@@ -49,6 +49,8 @@ button{cursor:pointer}
 .chip{display:inline-flex;align-items:center;gap:6px;font:500 12px/1 var(--f-body);padding:5px 8px;border-radius:999px;background:var(--raise);border:1px solid var(--line);white-space:nowrap}
 .chip i{width:8px;height:8px;border-radius:50%;background:var(--dot,var(--muted))}
 .chip.on{--dot:var(--ok)} .chip.off{--dot:var(--bad);color:var(--muted)}
+.chip small{font:400 11px/1 var(--f-body);color:var(--muted)}
+.chip.link-ok{--dot:var(--ok)} .chip.link-wait{--dot:var(--warn)} .chip.link-none,.chip.link-na{--dot:var(--na)}
 
 /* layout */
 .app{display:grid;grid-template-columns:250px minmax(0,1fr) 320px;gap:12px;align-items:start}
@@ -116,7 +118,7 @@ button{cursor:pointer}
 .step.blocked{background:var(--raise)}
 .step h3{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .owner{font:600 10.5px/1 var(--f-mono);letter-spacing:.05em;text-transform:uppercase;padding:4px 6px;border-radius:3px;color:var(--oc);background:color-mix(in srgb,var(--oc) 14%,transparent)}
-.o-simpad{--oc:var(--o-simpad)} .o-bank{--oc:var(--o-bank)} .o-not{--oc:var(--o-not)} .o-ins{--oc:var(--o-ins)} .o-tr{--oc:var(--o-tr)}
+.o-simpad{--oc:var(--o-simpad)} .o-bank{--oc:var(--o-bank)} .o-not{--oc:var(--o-not)} .o-ins{--oc:var(--o-ins)} .o-tr{--oc:var(--o-tr)} .o-sfr{--oc:var(--o-simpad)}
 .sdesc{font-size:12.5px;color:var(--muted);margin-top:3px}
 .sstate{font-size:12.5px;margin-top:5px}
 .sstate.bl{color:var(--warn)} .sstate.fl{color:var(--bad)} .sstate.dn{color:var(--ok)}
@@ -233,3 +235,8 @@ body.client #root, body.client #modalRoot{display:none!important}
 .bigin{font:600 28px/1.2 var(--f-mono);padding:10px 12px;width:100%}
 .note.big{font-size:20px;font-weight:600}
 @media (max-width:760px){.hall{grid-template-columns:1fr}.tnum.big{font-size:64px}.langgrid.small{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
+/* Камера для фото бланка — поверх всего, внутри программы */
+.camwrap{position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.86);display:flex;align-items:center;justify-content:center;padding:16px}
+.cambox{background:var(--raise);border-radius:10px;padding:12px;max-width:min(96vw,1100px);width:100%}
+.cambox video,.cambox canvas{width:100%;max-height:70vh;object-fit:contain;background:#000;border-radius:6px;display:block}

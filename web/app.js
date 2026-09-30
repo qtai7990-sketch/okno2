@@ -21,7 +21,6 @@
     catch (e) { p.reject(e); }
   }
   window.__simpadScanResult = settle;
-  window.__simpadPhotoResult = settle;
   window.__simpadPrintResult = settle;
   window.__simpadHttp = function (reqId, status, text) {
     const p = pending[reqId]; if (!p) return; delete pending[reqId];
@@ -47,12 +46,53 @@
     throw new Error("Неизвестный тип сканирования");
   }
 
-  /* Фото подписанного бумажного бланка: камера планшета (Android) или выбор файла (браузер). */
+  /* Фото подписанного бумажного бланка — камерой внутри программы. Кадр живёт только в памяти
+     и уходит на сервер в зашифрованное дело: ни галереи, ни файлов на планшете.
+     Выбор файла — только в учебном режиме в браузере, если у компьютера нет камеры. */
+  const PHOTO_MAX = 2400;
   function takePhoto() {
-    if (N) { const id = newId(); const w = waitNative(id, 180000, "Камера"); N.takePhoto(id); return w; }
+    const md = navigator.mediaDevices;
+    if (!md || !md.getUserMedia) return N ? Promise.reject(new Error("Камера недоступна в этой версии Android WebView")) : pickFile();
+    return new Promise((resolve, reject) => {
+      let stream = null, shot = null;
+      const w = document.createElement("div");
+      w.className = "camwrap";
+      w.innerHTML = `<div class="cambox"><video id="camV" autoplay playsinline muted></video><canvas id="camC" hidden></canvas>
+        <p class="est" id="camH">Наведите камеру на подписанный бланк целиком. Подпись должна читаться.</p>
+        <div class="row end"><button class="btn" id="camNo">Отмена</button><button class="btn" id="camRe" hidden>Переснять</button>
+        <button class="btn primary" id="camShot" disabled>Снять</button><button class="btn primary" id="camOk" hidden>Готово</button></div></div>`;
+      document.body.appendChild(w);
+      const v = w.querySelector("#camV"), cv = w.querySelector("#camC"), q = (id) => w.querySelector("#" + id);
+      const stop = () => { if (stream) stream.getTracks().forEach((t) => t.stop()); stream = null; };
+      const finish = (err, val) => { S._closeCam = null; stop(); shot = null; w.remove(); if (err) reject(err); else resolve(val); };
+      // блокировка экрана, выход или уход приложения с экрана закрывают камеру: снимок не переживает блокировку
+      S._closeCam = () => finish(new Error("Съёмка прервана — экран заблокирован"));
+      q("camNo").onclick = () => finish(new Error("Фото не сделано"));
+      q("camShot").onclick = () => {
+        const live = stream && stream.getVideoTracks().some((t) => t.readyState === "live");
+        if (!live || !v.videoWidth) { finish(new Error("Камера отключилась — сделайте снимок заново")); return; }
+        const k = Math.min(1, PHOTO_MAX / Math.max(v.videoWidth, v.videoHeight));
+        cv.width = Math.round(v.videoWidth * k); cv.height = Math.round(v.videoHeight * k);
+        cv.getContext("2d").drawImage(v, 0, 0, cv.width, cv.height);
+        shot = cv.toDataURL("image/jpeg", 0.85);
+        v.hidden = true; cv.hidden = false; q("camShot").hidden = true; q("camRe").hidden = false; q("camOk").hidden = false;
+        q("camH").textContent = "Проверьте: бланк целиком, подпись читается. Если нет — переснимите.";
+      };
+      q("camRe").onclick = () => { shot = null; v.hidden = false; cv.hidden = true; q("camShot").hidden = false; q("camRe").hidden = true; q("camOk").hidden = true; };
+      q("camOk").onclick = () => { const b64 = shot.split(",")[1]; finish(null, { mime: "image/jpeg", b64 }); };
+      md.getUserMedia({ video: { facingMode: { ideal: "environment" }, width: { ideal: 2560 }, height: { ideal: 1440 } }, audio: false })
+        .then((st) => { stream = st; v.srcObject = st; v.onloadedmetadata = () => { q("camShot").disabled = false; }; })
+        .catch((e) => {
+          const msg = e && e.name === "NotAllowedError" ? "Нет разрешения на камеру" : "Камера недоступна";
+          if (!N && isDemoBuild()) { S._closeCam = null; stop(); w.remove(); pickFile().then(resolve, reject); return; }
+          finish(new Error(msg));
+        });
+    });
+  }
+  function pickFile() {
     return new Promise((resolve, reject) => {
       const inp = document.createElement("input");
-      inp.type = "file"; inp.accept = "image/jpeg,image/png,application/pdf"; inp.setAttribute("capture", "environment");
+      inp.type = "file"; inp.accept = "image/jpeg,image/png,application/pdf";
       inp.onchange = () => {
         const f = inp.files && inp.files[0]; if (!f) { reject(new Error("Файл не выбран")); return; }
         const rd = new FileReader();
@@ -75,8 +115,8 @@
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const hhmm = (iso) => { if (!iso) return ""; const d = new Date(iso); return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); };
-  const OWN = { simpad: "Единое окно", bank: "Банк", insurer: "Страховщик", notary: "Бюро и нотариус", transfer: "Юнистрим" };
-  const OWNCLS = { simpad: "o-simpad", bank: "o-bank", insurer: "o-ins", notary: "o-not", transfer: "o-tr" };
+  const OWN = { simpad: "Единое окно", bank: "Банк", insurer: "Страховщик", notary: "Бюро и нотариус", transfer: "Юнистрим", sfr: "Соцфонд / МФЦ" };
+  const OWNCLS = { simpad: "o-simpad", bank: "o-bank", insurer: "o-ins", notary: "o-not", transfer: "o-tr", sfr: "o-sfr" };
   const PAY = { bankcard: "Новая карта банка‑партнёра (когда активна)", mir: "Карта «Мир» клиента на терминале", employer: "Аванс работодателя / предоплата из страны исхода", transfer: "Перевод через Юнистрим" };
   const PRULE = { no: "перевод не нужен", before: "перевод до начала", final: "перевод до выдачи", unknown: "не подтверждено банком" };
   const SVC = { card: "Карта", snils: "СНИЛС и Госуслуги", ebs: "ЕБС", sim: "SIM" };
@@ -84,7 +124,7 @@
   const REASONS = ["Низкая уверенность распознавания", "Расхождение оригинала и OCR", "Обязательное требование банка", "Написание по нотариальному переводу"];
   const RECIP = { simpad: "Единое окно — сопровождение", bank: "Банк‑партнёр", notary: "Бюро переводов и нотариус", insurer: "Страховщик ДМС" };
   const LANGS = { ru: "русский", tj: "таджикский", uz: "узбекский", ky: "киргизский" };
-  const MEMO_LANGS = ["ru", "tj", "uz"];  // памятки на киргизском пока нет — показывается русская
+  const MEMO_LANGS = ["ru", "tj", "uz", "ky"];
   // Кнопки выдачи талона: подпись на языке клиента, чтобы он сам показал, на каком говорит
   const TICKET_LANGS = [["tj", "Тоҷикӣ", "таджикский"], ["uz", "Oʻzbekcha", "узбекский"], ["ky", "Кыргызча", "киргизский"], ["ru", "Русский", "русский"]];
 
@@ -134,7 +174,7 @@
     if (S.me.role === "hall") return;  // планшет зала только выдаёт талоны
     if (S.me.role === "reception") { S.q = await api("GET", "/api/v1/queue"); return; }
     const [b, cases, texts, q] = await Promise.all([api("GET", "/api/v1/banks"), api("GET", "/api/v1/cases"), api("GET", "/api/v1/consent-texts"), api("GET", "/api/v1/queue")]);
-    S.banks = b.banks; S.notary = b.notary; S.hour = b.hour; S.cases = cases; S.texts = texts; S.q = q;
+    S.banks = b.banks; S.notary = b.notary; S.hour = b.hour; S.off = b.services_off || []; S.cases = cases; S.texts = texts; S.q = q;
     if (S.sel) S.view = await api("GET", "/api/v1/cases/" + S.sel);
     S.shift = await api("GET", "/api/v1/reports/shift");
   }
@@ -146,6 +186,7 @@
   function setView(v) { S.view = v; S.sel = v.id; }
   function logoutLocal(msg) {
     S.session = null; S.me = null; S.view = null; S.sel = null; S.cases = []; S.memo = null;
+    if (S._closeCam) S._closeCam();
     exitClientMode();
     $("modalRoot").innerHTML = "";
     loginScreen(msg);
@@ -191,7 +232,7 @@
     const root = $("root");
     if (!root.querySelector(".app")) {
       root.innerHTML = `<div class="bar" id="topbar"></div>
-        ${S.me.demo_scan || isDemoBuild() ? `<div class="banner demo">ДЕМОНСТРАЦИОННЫЙ ПРОТОТИП v0.2: тестовые данные, демо‑сканер. Реальные паспорта не вводить.</div>` : ""}
+        ${S.me.demo_scan || isDemoBuild() ? `<div class="banner demo">ДЕМОНСТРАЦИОННЫЙ РЕЖИМ: учебный сервер, вымышленные данные, демо‑сканер. Реальные паспорта не вводить.</div>` : ""}
         <div id="netBanner"></div>
         <div class="app"><aside class="panel" id="queuePanel"></aside><section class="panel" id="work"></section><aside class="panel side" id="sidePanel"></aside></div>`;
     }
@@ -200,8 +241,10 @@
 
   function renderTop() {
     const tb = $("topbar"); if (!tb || !S.me) return;
-    const chips = S.banks.map((b) => `<span class="chip ${b.open_now ? "on" : "off"}"><i></i>${esc(b.name)}</span>`).join("")
-      + (S.notary ? `<span class="chip ${S.notary.open_now ? "on" : "off"}"><i></i>Нотариус</span>` : "");
+    // Цвет — связь с банком (серый: не подключён, жёлтый: нет обмена больше суток, зелёный: на связи).
+    // Часы работы стойки банка — отдельной подписью, не цветом.
+    const chips = S.banks.map((b) => `<span class="chip link-${esc(b.link || "none")}" title="${esc(b.name)}: ${esc(b.link_text || "не подключён")}; стойка ${esc(b.hours)}"><i></i>${esc(b.name)}<small>${esc(b.link_text || "не подключён")}${b.open_now ? "" : " · закрыт до " + b.open_from + ":00"}</small></span>`).join("")
+      + (S.notary ? `<span class="chip link-na"><i></i>Нотариус<small>${S.notary.open_now ? "работает" : "с " + S.notary.open_from + ":00"}</small></span>` : "");
     const h = S.hour != null ? String(Math.floor(S.hour)).padStart(2, "0") + ":" + String(Math.round((S.hour % 1) * 60)).padStart(2, "0") : "--:--";
     tb.innerHTML = `<div class="brand"><b>Единое окно</b><span>${esc(S.me.stand.name)} · ${esc(S.me.device)} · ${esc(S.me.operator.name)}</span></div>
       <div class="chips">${chips}</div>
@@ -209,7 +252,9 @@
         <span class="chip ${S.online ? "on" : "off"}"><i></i>${S.online ? "Связь есть" : "Нет связи"}</span>
         <button class="btn small" data-act="logout">Выйти</button></div>`;
     const nb = $("netBanner");
-    if (nb) nb.innerHTML = S.online ? "" : `<div class="banner off">Нет связи с сервером. Передача в банк недоступна. Ничего не отправляется автоматически: после восстановления связи сервер перепроверит согласия и дубли.</div>`;
+    const noLink = S.banks.length && !S.banks.some((b) => b.link === "ok");
+    if (nb) nb.innerHTML = (S.online ? "" : `<div class="banner off">Нет связи с сервером. Передача в банк недоступна. Ничего не отправляется автоматически: после восстановления связи сервер перепроверит согласия и дубли.</div>`)
+      + (noLink ? `<div class="banner demo">Банки не подключены: обмен с банками не настроен. Передача — по номеру дела, статусы банка не приходят.</div>` : "");
   }
 
   function renderQueue() {
@@ -289,14 +334,16 @@
   }
 
   function pkgView(v) {
-    const P = [["card", "Только карта"], ["sim", "Только SIM"], ["full", "Полный пакет"]];
+    const off = S.off || [];
+    const P = [["card", "Только карта"], ["sim", "Только SIM"], ["full", "Полный пакет"]]
+      .filter((x) => !(x[0] === "card" && off.includes("card")) && !(x[0] === "sim" && off.includes("sim")) && !(x[0] === "full" && (off.includes("card") || off.includes("sim"))) || v.pkg === x[0]);
     const locked = !!v.sent_at;
     const dr = v.doc_rules || {};
-    return `${v.migcard ? `<div class="note b">Цель по миграционной карте: <b>${esc(v.migcard.purpose)}</b>. ${v.purpose === "patent" ? "Для патента нужен ДМС, договор платных медуслуг или ОМС." : ""}</div>` : ""}
+    return `${v.migcard ? `<div class="note b">Цель по миграционной карте: <b>${esc(v.migcard.purpose)}</b>. ${v.purpose === "patent" ? (v.eaeu ? "Гражданину ЕАЭС патент не нужен: учёт — 30 дней, медосвидетельствование и дактилоскопия — 30 дней." : "Для патента нужен ДМС, договор платных медуслуг или ОМС.") : ""}</div>` : ""}
       <h3>Что нужно человеку</h3>
       <div class="pkgs">${P.map((x) => `<button class="pkg ${v.pkg === x[0] ? "sel" : ""}" data-act="pkg" data-v="${x[0]}" ${locked ? "disabled" : ""}><b>${x[1]}</b></button>`).join("")}</div>
       <div class="opts">
-        ${[["dms", "Полис ДМС (добровольно)"], ["transfer", "Первый перевод на родину (Юнистрим)"], ["phone", "Android‑смартфон под «Амину»"]].map((o) => `<label class="check"><input type="checkbox" data-opt="${o[0]}" ${v.opts[o[0]] ? "checked" : ""}><span>${o[1]}</span></label>`).join("")}
+        ${[["dms", "Полис ДМС (добровольно)"], ["transfer", "Первый перевод на родину (Юнистрим)"], ["phone", "Android‑смартфон под «Амину»"]].filter((o) => !off.includes(o[0]) || v.opts[o[0]]).map((o) => `<label class="check"><input type="checkbox" data-opt="${o[0]}" ${v.opts[o[0]] ? "checked" : ""}><span>${o[1]}</span></label>`).join("")}
       </div>
       <h3>Банк — выбирает клиент</h3>
       <div class="banks">${S.banks.map((b) => `<button class="bank ${v.bank_id === b.id ? "sel" : ""}" data-act="bank" data-v="${esc(b.id)}" ${locked ? "disabled" : ""}><b>${esc(b.name)}</b>
@@ -324,8 +371,8 @@
             <button class="btn small primary" data-act="manualHandoff" ${canSend ? "" : "disabled"}>Номер дела передан в банк</button></div>`;
     const steps = v.steps.map((s, i) => {
       let state, cls = s.status;
-      const src = s.source === "bank" ? " · подтверждено банком" : s.source === "bank_file" ? " · по файлу сверки банка" : "";
-      if (s.status === "done") state = `<p class="sstate dn">Выполнено в ${hhmm(s.updated_at)}${s.key === "card" ? (v.card_state === "active" ? " · активна" : " · активация не подтверждена") : ""}${src}</p>`;
+      const src = s.source === "bank" ? " · подтверждено банком" : s.source === "bank_file" ? " · по файлу сверки банка" : s.source === "sfr" ? " · по уведомлению Соцфонда" : "";
+      if (s.status === "done") state = `<p class="sstate dn">Выполнено в ${hhmm(s.updated_at)}${s.key === "card" ? (v.card_state === "active" ? " · активна" : " · активация не подтверждена") : ""}${src}${s.note && s.operator_can_mark ? " · " + esc(s.note) : ""}</p>`;
       else if (s.status === "fail") state = `<p class="sstate fl">Отказ${s.note ? ": " + esc(s.note) : ""}${src}</p>`;
       else if (s.blockers.length) { cls += " blocked"; state = `<p class="sstate bl">${s.blockers.map(esc).join(" · ")}</p>`; }
       else if (s.status === "work") state = `<p class="sstate">В работе с ${hhmm(s.updated_at)}${src}</p>`;
@@ -334,9 +381,9 @@
       const can = !s.blockers.length;
       if (s.operator_can_mark && s.status !== "done") {
         if (s.key === "imei") a = `<button class="btn small primary" data-act="imei" ${can ? "" : "disabled"}>Сканировать IMEI</button>`;
-        else a = `<button class="btn small ok" data-act="mark" data-k="${s.key}" data-s="done" ${can ? "" : "disabled"}>Выполнено</button>
+        else a = `<button class="btn small ok" data-act="markDone" data-k="${s.key}" ${can ? "" : "disabled"}>Выполнено</button>
           ${s.status !== "work" ? `<button class="btn small" data-act="mark" data-k="${s.key}" data-s="work" ${can ? "" : "disabled"}>В работе</button>` : ""}
-          <button class="btn small bad" data-act="mark" data-k="${s.key}" data-s="fail">Не удалось</button>`;
+          <button class="btn small bad" data-act="markFail" data-k="${s.key}">Не удалось</button>`;
       } else if (s.owner === "bank") a = `<span class="auto">ТОЛЬКО ОТ БАНКА</span>`;
       return `<div class="step ${cls}"><span class="ix">${s.status === "done" ? "✓" : s.status === "fail" ? "✕" : i + 1}</span>
         <div><h3>${esc(s.title)} <span class="owner ${OWNCLS[s.owner]}">${esc(s.owner === "bank" ? b.name : OWN[s.owner])}</span></h3>${state}</div>
@@ -357,7 +404,6 @@
     const m = S.memo;
     return `<div class="row no-print"><span class="eyebrow">Язык</span><div class="lang">${MEMO_LANGS.map((l) => `<button data-act="memoLang" data-l="${l}" class="${memoLangOf(v) === l ? "act" : ""}">${l.toUpperCase()}</button>`).join("")}</div>
       <button class="btn small" data-act="print">Печать</button></div>
-      ${v.lang === "ky" && !S.memoLang ? `<div class="note w no-print">Памятки на киргизском пока нет — показана русская.</div>` : ""}
       ${memoLangOf(v) !== "ru" ? `<div class="note w no-print">Перевод памятки черновой — проверить носителем языка до запуска.</div>` : ""}
       ${m && m.case_number === v.number ? `<div class="memo"><h3>${esc(m.title)}</h3><p><b>${esc(m.name)}</b> · обращение ${esc(m.case_number)}</p>
         ${m.sections.map((s) => `<div><span class="eyebrow">${esc(s.title)}</span><ul>${s.items.map((i) => `<li>${esc(i)}</li>`).join("") || "<li>—</li>"}</ul></div>`).join("")}
@@ -372,6 +418,8 @@
         <div class="kpi"><b>${sh.cases}</b><span>обращений сегодня</span></div>
         <div class="kpi"><b>${sh.reached_bank_pct}%</b><span>дошли до банка</span></div>
         <div class="kpi"><b>${sh.sim_chain_pct == null ? "—" : sh.sim_chain_pct + "%"}</b><span>SIM выдана (по данным банка)</span></div>
+        <div class="kpi"><b>${sh.with_ticket}</b><span>с талоном</span></div>
+        <div class="kpi"><b>${sh.without_ticket}</b><span>без талона</span></div>
         <div class="kpi"><b>${sh.corrections}</b><span>ручных правок</span></div>
         <div class="kpi"><b>${sh.unverified_claims}</b><span>статусов «со слов», не в KPI</span></div></div>
         <table><thead><tr><th>Банк</th><th class="r">Обр.</th><th class="r">Карт</th><th class="r">SIM</th></tr></thead><tbody>
@@ -565,9 +613,9 @@
       if ($("ctT")) $("ctT").onchange = () => { t = pick($("ctT").value); $("ctBody").innerHTML = consentBody(t); };
       document.querySelectorAll("input[name=ctM]").forEach((x) => { x.onchange = refresh; });
       $("ctPhoto").onclick = async () => {
-        try { evidence = await takePhoto(); $("ctPh").textContent = "Фото бланка готово (" + Math.round(evidence.b64.length * 0.75 / 1024) + " КБ). Проверьте, что подпись видна."; }
+        try { const ph = await takePhoto(); if (!$("ctPh")) return; evidence = ph; $("ctPh").textContent = "Фото бланка готово (" + Math.round(evidence.b64.length * 0.75 / 1024) + " КБ). Проверьте, что подпись видна."; }
         catch (e) { toast(e.message, true); }
-        refresh();
+        if ($("ctPh")) refresh();
       };
       $("mNo").onclick = close;
       cl.onclick = () => { const lang = $("ctL").value; close(); clientMode(v, r, t, lang); };
@@ -627,7 +675,9 @@
   }
 
   /* Блокировка экрана, когда приложение ушло с экрана (вызывает Android): вернуться — только по ПИН. */
+  function closeCamera() { if (S._closeCam) S._closeCam(); }
   function screenLock(err) {
+    closeCamera();
     const cr = $("clientRoot");
     document.body.classList.add("client");
     $("modalRoot").innerHTML = "";
@@ -645,6 +695,7 @@
     pin.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
   }
   window.__simpadLock = function () {
+    closeCamera();
     if (!S.session) return;
     if (S._lockHook) { S._lockHook(); return; }
     screenLock();
@@ -718,6 +769,27 @@
     });
   }
 
+  /* «Выполнено» по шагу без интеграции — с номером подтверждающего документа; «не удалось» — с причиной. */
+  function stepModal(v, key, status) {
+    const s = v.steps.find((x) => x.key === key); if (!s) return;
+    const done = status === "done", needDoc = done && !!s.doc_label;
+    if (done && !needDoc) { act(async () => setView(await api("POST", `/api/v1/cases/${v.id}/steps/${key}`, { status: "done", note: "" }))); return; }
+    modal(`<h3>${esc(s.title)}: ${done ? "выполнено" : "не удалось"}</h3>
+      ${needDoc ? `<div class="field"><label for="stD">${esc(s.doc_label)}</label><input id="stD" maxlength="40" autocomplete="off" ${key === "snils" ? `inputmode="numeric" placeholder="000-000-000 00"` : ""}></div>
+        <p class="est">${key === "snils" ? "Сверьте с уведомлением о регистрации. В деле сохранятся только последние цифры." : "Без номера документа отметку поставить нельзя: по нему шаг проверяется при сверке."}</p>` : ""}
+      <div class="field"><label for="stN">${done ? "Комментарий (необязательно)" : "Причина — обязательно"}</label><input id="stN" maxlength="500" placeholder="${done ? "" : "например, нотариус не принял паспорт: повреждена страница"}"></div>
+      <div class="row end"><button class="btn" id="mNo">Отмена</button><button class="btn primary" id="mYes" disabled>Сохранить</button></div>`, (close) => {
+      const ok = () => { $("mYes").disabled = needDoc ? $("stD").value.trim().length < 3 : !done && $("stN").value.trim().length < 5; };
+      ["stD", "stN"].forEach((id) => { if ($(id)) $(id).oninput = ok; });
+      $("mNo").onclick = close;
+      $("mYes").onclick = () => act(async () => {
+        setView(await api("POST", `/api/v1/cases/${v.id}/steps/${key}`, { status, note: $("stN").value.trim(), doc: needDoc ? $("stD").value.trim() : "" }));
+        close();
+      });
+      ($("stD") || $("stN")).focus();
+    });
+  }
+
   /* ================= действия ================= */
   async function loadMemo() {
     if (!S.view) return;
@@ -785,6 +857,8 @@
     async preview() { await previewModal(S.view); },
     manualHandoff() { manualModal(S.view); },
     async mark(el) { setView(await api("POST", `/api/v1/cases/${S.sel}/steps/${el.dataset.k}`, { status: el.dataset.s, note: "" })); },
+    markDone(el) { stepModal(S.view, el.dataset.k, "done"); },
+    markFail(el) { stepModal(S.view, el.dataset.k, "fail"); },
     async imei() { const r = await scan("imei"); setView(await api("POST", `/api/v1/cases/${S.sel}/steps/imei`, { status: "done", imei: r.imei })); },
     claim() { claimModal(S.view); },
     async memoLang(el) { S.memoLang = el.dataset.l; await loadMemo(); },
@@ -817,7 +891,7 @@
     },
     async toBank() { await api("POST", `/api/v1/cases/${S.sel}/to-bank`); await refreshCase(); toast("Клиент вызван к окну банка"); }
   };
-  const DIRECT = new Set(["saveCfg", "toSetup", "toLogin", "login", "fix", "claim", "consentStart", "manualHandoff", "pickPrinter", "testPrint"]);
+  const DIRECT = new Set(["saveCfg", "toSetup", "toLogin", "login", "fix", "claim", "consentStart", "manualHandoff", "pickPrinter", "testPrint", "markDone", "markFail"]);
   document.addEventListener("click", (e) => {
     S.lastAction = Date.now();
     const el = e.target.closest("[data-act]"); if (!el || el.disabled) return;
@@ -853,7 +927,7 @@
     setInterval(() => {
       if (S.busy || !S.me || S.me.role !== "desk") return;
       Promise.all([api("GET", "/api/v1/banks"), api("GET", "/api/v1/reports/shift")])
-        .then(([b, sh]) => { S.banks = b.banks; S.notary = b.notary; S.hour = b.hour; S.shift = sh; renderTop(); renderSide(); })
+        .then(([b, sh]) => { S.banks = b.banks; S.notary = b.notary; S.hour = b.hour; S.off = b.services_off || []; S.shift = sh; renderTop(); renderSide(); })
         .catch(() => renderTop());
     }, 30000);
   }

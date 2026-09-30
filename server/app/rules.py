@@ -30,6 +30,21 @@ STEPS: dict[str, dict] = {
 # Шаги банка в пилоте «номер дела» оператор отмечает только как нейтральный статус со слов банка.
 OPERATOR_STEPS = {"wifi", "imei", "phone", "dms", "transl", "transfer"}
 
+# «Выполнено» по шагам исполнителей без интеграции — только с номером документа, который это подтверждает.
+# СНИЛС здесь только в режиме «через Соцфонд»: тогда шаг подтверждает сотрудник по уведомлению о регистрации.
+DOC_STEPS = {
+    "dms": "Номер полиса ДМС",
+    "transl": "Номер в реестре нотариальных действий",
+    "transfer": "Контрольный номер перевода",
+    "snils": "Номер СНИЛС из уведомления о регистрации",
+}
+# Как подтверждается СНИЛС и подтверждённая учётная запись Госуслуг:
+#   bank — событиями банка (только если у точки банка есть такие полномочия и договор);
+#   sfr  — клиент оформляет через Соцфонд/МФЦ, сотрудник отмечает по уведомлению о регистрации.
+SNILS_CHANNELS = ("bank", "sfr")
+# Услуги, которые можно выключить настройкой сервера (нет договора — сотрудник их не видит и не предлагает)
+SWITCHABLE = ("card", "sim", "dms", "transfer", "phone")
+
 POLICY_RULES = {"no", "before", "final", "unknown"}
 PAY_METHODS = {"bankcard", "mir", "employer", "transfer"}
 RECIPIENTS = {"simpad", "bank", "notary", "insurer"}
@@ -93,6 +108,7 @@ class Ctx:
     sent: bool
     online: bool = True
     scanned: bool = False
+    snils_channel: str = "bank"
     extra: dict = field(default_factory=dict)
 
 
@@ -103,6 +119,21 @@ def bank_services(pkg: str | None) -> list[str]:
     if pkg in ("sim", "full"):
         out += ["snils", "ebs", "sim"]
     return out
+
+
+def bank_services_ctx(ctx: Ctx) -> list[str]:
+    """Услуги, статус которых приходит от банка. СНИЛС через Соцфонд банку не принадлежит."""
+    return [s for s in bank_services(ctx.pkg) if not (s == "snils" and ctx.snils_channel == "sfr")]
+
+
+def owner(ctx: Ctx, key: str) -> str:
+    if key == "snils" and ctx.snils_channel == "sfr":
+        return "sfr"
+    return STEPS[key]["owner"]
+
+
+def operator_can_mark(ctx: Ctx, key: str) -> bool:
+    return key in OPERATOR_STEPS or (key == "snils" and ctx.snils_channel == "sfr")
 
 
 def transl_rule(ctx: Ctx, svc: str) -> str:
@@ -188,8 +219,8 @@ def blockers(ctx: Ctx, key: str) -> list[str]:
     for d in deps(ctx, key):
         if ctx.status.get(d, "todo") != "done":
             out.append(f"Ждёт «{STEPS[d]['title']}»")
-    owner = STEPS[key]["owner"]
-    if owner == "bank":
+    own = owner(ctx, key)
+    if own == "bank":
         if not ctx.bank_name:
             out.append("Банк не выбран")
         else:
@@ -199,18 +230,18 @@ def blockers(ctx: Ctx, key: str) -> list[str]:
                 out.append("Нет согласия клиента на передачу данных банку")
             elif not ctx.sent:
                 out.append("Обращение не передано в банк")
-    if owner == "notary":
+    if own == "notary":
         if "notary" not in ctx.consents:
             out.append("Нет согласия на передачу скана бюро переводов")
         if not _open(ctx.hour, ctx.notary_open):
             out.append(f"Нотариус работает {ctx.notary_open[0]}:00–{ctx.notary_open[1]}:00")
-    if owner == "insurer" and "insurer" not in ctx.consents:
+    if own == "insurer" and "insurer" not in ctx.consents:
         out.append("Нет согласия на передачу данных страховщику")
     if key == "dms" and ctx.pay.get("dms") == "bankcard" and ctx.card_state != "active":
         out.append("Оплата выбрана новой картой, а карта ещё не активна — смените способ оплаты")
     if key == "sim" and ctx.pay.get("sim") == "bankcard" and ctx.card_state != "active":
         out.append("Первый месяц SIM выбран новой картой, а карта ещё не активна")
-    if not ctx.online and STEPS[key]["auto"]:
+    if not ctx.online and own == "bank":
         out.append("Нет связи — обращение сохранено как черновик")
     return out
 

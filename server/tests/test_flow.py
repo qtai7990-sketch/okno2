@@ -418,7 +418,9 @@ def test_dms_payment_by_inactive_card_blocked(env):
     r = c.post(f"/api/v1/cases/{cid}/steps/dms", json={"status": "done"}, headers=h)
     assert r.status_code == 409 and "не активна" in r.json()["detail"]
     c.patch(f"/api/v1/cases/{cid}", json={"pay": {"dms": "mir"}}, headers=h)
-    assert c.post(f"/api/v1/cases/{cid}/steps/dms", json={"status": "done"}, headers=h).status_code == 200
+    # «выполнено» по ДМС — только с номером полиса
+    assert c.post(f"/api/v1/cases/{cid}/steps/dms", json={"status": "done"}, headers=h).status_code == 422
+    assert c.post(f"/api/v1/cases/{cid}/steps/dms", json={"status": "done", "doc": "ДМС-2026/0457"}, headers=h).status_code == 200
 
 
 def test_corrections_journal(env):

@@ -17,7 +17,8 @@
   bank-set <код> поле=значение ...                 legal_name, inn, mode(api|case), open_from, open_to,
                                                    cert_fingerprint, sim_authority_confirmed(true|false),
                                                    status_map='{"КОД_БАНКА":"КОД_СЛОВАРЯ"}', active(true|false),
-                                                   window (номер окна банка для вызова на табло)
+                                                   window (номер окна банка для вызова на табло),
+                                                   snils_channel=bank|sfr (СНИЛС и Госуслуги: банком или через Соцфонд/МФЦ)
   bank-rotate <код>                                новый ключ и секрет; старые действуют 24 часа
   policy <банк> <card|snils|ebs|sim> <страна ISO3> <no|before|final|unknown> "<письмо № … от …>"
   text-add <файл.json>                             загрузить тексты согласий (образец docs/consent_texts.example.json)
@@ -28,6 +29,7 @@
   purge <дней>                                     удалить закрытые обращения старше N дней
   ticket-text <ru|tj|uz|ky> "<как пройти в офис>"  текст маршрута на талоне
   queue-report [ГГГГ-ММ-ДД]                        талоны за день: выдано, пришли, обслужены, ожидание, по сотрудникам зала
+  services-off [card,sim,dms,transfer,phone | -]   услуги без договора: стойка их не видит. «-» — включить всё
 """
 import json
 import os
@@ -155,7 +157,7 @@ def main(a):
         body = {}
         for kv in args[1:]:
             k, _, v = kv.partition("=")
-            body[k] = v if k in ("window", "inn", "legal_name") else val(v)
+            body[k] = v if k in ("window", "inn", "legal_name", "snils_channel") else val(v)
         show(call("PATCH", f"/admin/v1/banks/{args[0]}", body))
     elif cmd == "bank-rotate":
         show(call("POST", f"/admin/v1/banks/{args[0]}/rotate"))
@@ -180,6 +182,9 @@ def main(a):
         show(call("POST", f"/admin/v1/purge?days={int(args[0])}"))
     elif cmd == "ticket-text":
         show(call("PUT", f"/admin/v1/ticket-texts/{args[0]}", {"route": args[1]}))
+    elif cmd == "services-off":
+        items = [] if args[0] == "-" else [x.strip() for x in args[0].split(",") if x.strip()]
+        show(call("PUT", "/admin/v1/settings/services_off", items))
     elif cmd == "queue-report":
         show(call("GET", "/admin/v1/reports/queue?stand_id=zia" + (f"&date={args[0]}" if args else "")))
     else:
