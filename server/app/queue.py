@@ -322,27 +322,32 @@ class Queue:
         waits = [(t.first_called_at - t.checked_in_at).total_seconds() / 60 for t in came
                  if t.first_called_at and t.checked_in_at and t.first_called_at >= t.checked_in_at]
         ops = {o.id: o for o in self.db.scalars(select(Operator).where(Operator.stand_id == stand_id))}
-        by_op: dict[str, dict] = {}
-        for t in rows:
-            if t.source != "hall":
-                continue
-            o = ops.get(t.issued_operator_id)
-            k = o.code if o else str(t.issued_operator_id)
-            d = by_op.setdefault(k, {"name": o.name if o else "", "issued": 0, "came": 0, "served": 0})
-            d["issued"] += 1
-            d["came"] += bool(t.checked_in_at)
-            d["served"] += t.status in ("serving", "bank", "done")
+        def by_operator(source: str) -> dict[str, dict]:
+            out: dict[str, dict] = {}
+            for t in rows:
+                if t.source != source:
+                    continue
+                o = ops.get(t.issued_operator_id)
+                k = o.code if o else str(t.issued_operator_id)
+                d = out.setdefault(k, {"name": o.name if o else "", "issued": 0, "came": 0, "served": 0})
+                d["issued"] += 1
+                d["came"] += bool(t.checked_in_at)
+                d["served"] += t.status in ("serving", "bank", "done")
+            return out
         hours: dict[int, int] = {}
         for t in rows:
             h = datetime.fromisoformat(iso(t.issued_at)).astimezone(self.tz).hour
             hours[h] = hours.get(h, 0) + 1
         hall = [t for t in rows if t.source == "hall"]
-        return {"date": day, "issued": len(rows), "issued_hall": len(hall),
+        floor1 = [t for t in rows if t.source == "floor1"]
+        return {"date": day, "issued": len(rows), "issued_hall": len(hall), "issued_floor1": len(floor1),
                 "printed_hall": sum(1 for t in hall if t.printed_at),
+                "printed_floor1": sum(1 for t in floor1 if t.printed_at),
                 "came": len(came), "came_from_hall_pct": round(sum(1 for t in hall if t.checked_in_at) / len(hall) * 100) if hall else None,
                 "served": len(served), "noshow": sum(1 for t in rows if t.status == "noshow"),
                 "avg_wait_min": round(sum(waits) / len(waits), 1) if waits else None,
                 "max_wait_min": round(max(waits), 1) if waits else None,
                 "by_lang": {lg: sum(1 for t in rows if t.lang == lg) for lg in LANGS},
-                "by_hour": dict(sorted(hours.items())), "by_hall_operator": by_op,
+                "by_hour": dict(sorted(hours.items())), "by_hall_operator": by_operator("hall"),
+                "by_floor1_operator": by_operator("floor1"),
                 "basis": "талоны без персональных данных; «пришли» — отсканированы в офисе"}
