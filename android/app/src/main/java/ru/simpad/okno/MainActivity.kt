@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.Bundle
 import android.print.PrintAttributes
 import android.print.PrintManager
+import android.view.KeyEvent
 import android.view.WindowManager
 import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
@@ -144,6 +145,19 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         printer.shutdown()
         super.onDestroy()
+    }
+
+    /**
+     * Samsung Active Key настраивается MDM/Knox как F2. Обрабатываем его только
+     * через Web UI: проверка согласия 152-ФЗ остаётся в JavaScript и сканер
+     * никогда не запускается нативным кодом в обход этого ограничения.
+     */
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.keyCode == KeyEvent.KEYCODE_F2 && event.action == KeyEvent.ACTION_UP) {
+            web.evaluateJavascript("window.__floor1Action && window.__floor1Action('scan')", null)
+            return true
+        }
+        return super.dispatchKeyEvent(event)
     }
 
     /** Результат сканирования — обратно в интерфейс. */

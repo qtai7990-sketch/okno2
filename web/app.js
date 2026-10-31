@@ -1,4 +1,4 @@
-/* Единое окно — интерфейс стойки. Демонстрационный прототип v0.2.
+/* Единое окно — интерфейс стойки. Демонстрационный прототип v0.3.0.
  * В Android-приложении все запросы к серверу идут через нативный мост: ключ планшета хранится в Android Keystore
  * и в JavaScript не попадает. В браузере (только для проверки) ключ живёт в памяти вкладки до перезагрузки.
  * Все решения о маршруте принимает сервер; интерфейс только показывает и отправляет действия. */
@@ -107,6 +107,7 @@
   /* ================= состояние ================= */
   const S = { server: N ? (N.getServer() || "") : "", devKey: null, session: null, me: null, banks: [], notary: null, hour: null,
     cases: [], sel: null, view: null, tab: "cs", texts: [], shift: null, online: true, busy: false, memoLang: null, memo: null,
+    floor1: null, floor1Texts: [], floor1Ticket: null, floor1TicketKey: null, floor1TicketPrinted: false,
     lastAction: Date.now() };
   const configured = () => (N ? !!N.isConfigured() : !!(S.server && S.devKey));
   const IDLE_MS = 14 * 60 * 1000; // на минуту раньше сервера — экран не останется открытым с чужой сессией
@@ -172,6 +173,7 @@
   async function refreshAll() {
     S.me = await api("GET", "/api/v1/me");
     if (S.me.role === "hall") return;  // планшет зала только выдаёт талоны
+    if (S.me.role === "floor1") { S.floor1Texts = await api("GET", "/api/v1/floor1/consent-texts"); return; }
     if (S.me.role === "reception") { S.q = await api("GET", "/api/v1/queue"); return; }
     const [b, cases, texts, q] = await Promise.all([api("GET", "/api/v1/banks"), api("GET", "/api/v1/cases"), api("GET", "/api/v1/consent-texts"), api("GET", "/api/v1/queue")]);
     S.banks = b.banks; S.notary = b.notary; S.hour = b.hour; S.off = b.services_off || []; S.cases = cases; S.texts = texts; S.q = q;
@@ -186,8 +188,10 @@
   function setView(v) { S.view = v; S.sel = v.id; }
   function logoutLocal(msg) {
     S.session = null; S.me = null; S.view = null; S.sel = null; S.cases = []; S.memo = null;
+    S.floor1 = null; S.floor1Texts = []; S.floor1Ticket = null; S.floor1TicketKey = null; S.floor1TicketPrinted = false;
     if (S._closeCam) S._closeCam();
     exitClientMode();
+    document.body.classList.remove("floor1-mode");
     $("modalRoot").innerHTML = "";
     loginScreen(msg);
   }
@@ -227,6 +231,8 @@
   /* ================= основной экран ================= */
   function render() {
     if (!S.me) return;
+    document.body.classList.toggle("floor1-mode", S.me.role === "floor1");
+    if (S.me.role === "floor1") { renderFloor1(); return; }
     if (S.me.role === "hall") { renderHall(); return; }
     if (S.me.role === "reception") { renderReception(); return; }
     const root = $("root");
@@ -243,13 +249,13 @@
     const tb = $("topbar"); if (!tb || !S.me) return;
     // Цвет — связь с банком (серый: не подключён, жёлтый: нет обмена больше суток, зелёный: на связи).
     // Часы работы стойки банка — отдельной подписью, не цветом.
-    const chips = S.banks.map((b) => `<span class="chip link-${esc(b.link || "none")}" title="${esc(b.name)}: ${esc(b.link_text || "не подключён")}; стойка ${esc(b.hours)}"><i></i>${esc(b.name)}<small>${esc(b.link_text || "не подключён")}${b.open_now ? "" : " · закрыт до " + b.open_from + ":00"}</small></span>`).join("")
-      + (S.notary ? `<span class="chip link-na"><i></i>Нотариус<small>${S.notary.open_now ? "работает" : "с " + S.notary.open_from + ":00"}</small></span>` : "");
+    const statuses = S.banks.map((b) => `<span class="status-item link-${esc(b.link || "none")}" title="${esc(b.name)}: ${esc(b.link_text || "не подключён")}; стойка ${esc(b.hours)}"><i></i>${esc(b.name)}<small>${esc(b.link_text || "не подключён")}${b.open_now ? "" : " · закрыт до " + b.open_from + ":00"}</small></span>`).join("")
+      + (S.notary ? `<span class="status-item link-na"><i></i>Нотариус<small>${S.notary.open_now ? "работает" : "с " + S.notary.open_from + ":00"}</small></span>` : "");
     const h = S.hour != null ? String(Math.floor(S.hour)).padStart(2, "0") + ":" + String(Math.round((S.hour % 1) * 60)).padStart(2, "0") : "--:--";
     tb.innerHTML = `<div class="brand"><b>Единое окно</b><span>${esc(S.me.stand.name)} · ${esc(S.me.device)} · ${esc(S.me.operator.name)}</span></div>
-      <div class="chips">${chips}</div>
+      <div class="status-list">${statuses}</div>
       <div class="clock"><span class="eyebrow">Время сервера</span><output>${h}</output>
-        <span class="chip ${S.online ? "on" : "off"}"><i></i>${S.online ? "Связь есть" : "Нет связи"}</span>
+        <span class="status-item ${S.online ? "on" : "off"}"><i></i>${S.online ? "Связь есть" : "Нет связи"}</span>
         <button class="btn small" data-act="logout">Выйти</button></div>`;
     const nb = $("netBanner");
     const noLink = S.banks.length && !S.banks.some((b) => b.link === "ok");
@@ -269,6 +275,9 @@
   }
 
   const hasConsent = (v, r) => v.consents.some((c) => c.recipient === r && c.valid);
+  function firstIncompleteTab(v) {
+    return !hasConsent(v, "simpad") ? "cs" : !v.passport || !v.migcard ? "scan" : !v.bank_id ? "pkg" : !hasConsent(v, "bank") ? "consent" : "route";
+  }
   function renderWork() {
     const w = $("work"); if (!w) return;
     const v = S.view;
@@ -504,8 +513,8 @@
   function renderHall() {
     const t = S.lastTicket;
     $("root").innerHTML = `<div class="bar"><div class="brand"><b>Единое окно</b><span>Зал · ${esc(S.me.device)} · ${esc(S.me.operator.name)}</span></div>
-        <div class="clock"><span class="chip ${S.online ? "on" : "off"}"><i></i>${S.online ? "Связь есть" : "Нет связи"}</span>
-        <span class="chip ${canPrint() ? "on" : "off"}"><i></i>${canPrint() ? "Принтер: " + esc(N.printerName()) : "Принтер не подключён"}</span>
+        <div class="clock"><span class="status-item ${S.online ? "on" : "off"}"><i></i>${S.online ? "Связь есть" : "Нет связи"}</span>
+        <span class="status-item ${canPrint() ? "on" : "off"}"><i></i>${canPrint() ? "Принтер: " + esc(N.printerName()) : "Принтер не подключён"}</span>
         <button class="btn small" data-act="logout">Выйти</button></div></div>
       ${S.me.demo_scan || isDemoBuild() ? `<div class="banner demo">ДЕМОНСТРАЦИОННЫЙ ПРОТОТИП: учебный сервер.</div>` : ""}
       <div class="hall">
@@ -519,12 +528,127 @@
           : `<div class="empty">Здесь появится талон</div>`}</section></div>`;
   }
 
+  /* ================= агент 1-го этажа: pre-check-in перед офисом ================= */
+  const floor1ConsentDone = () => !!(S.floor1 && S.floor1.consent_signed);
+  const floor1PassportDone = () => !!(S.floor1 && S.floor1.passport);
+  const floor1TicketIssued = () => !!(S.floor1 && S.floor1.ticket);
+  function floor1NextHint() {
+    if (!S.floor1) return "Открыть карточку клиента";
+    if (!floor1ConsentDone()) return "Подписать согласие";
+    if (!floor1PassportDone()) return "Сканировать паспорт";
+    if (!S.floor1Ticket) return "Выдать талон";
+    if (S.printErr) return "Повторить печать";
+    return "Новый клиент";
+  }
+  function floor1Back() {
+    const target = !S.floor1 ? "floor1-intro" : !floor1ConsentDone() ? "floor1-consent" : !floor1PassportDone() ? "floor1-passport" : "floor1-ticket";
+    const el = document.getElementById(target);
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+  function floor1Brand() {
+    return `<div class="floor1-brand" aria-label="Международный аэропорт Жуковский и Документ-экспресс">
+      <div class="brand-unit zia-brand">
+        <span class="zia-logo-box"><img src="assets/zhukovsky-airport-logo-source.png" alt="Zhukovsky International Airport"></span>
+      </div><span class="brand-divider" aria-hidden="true"></span>
+      <div class="brand-unit express-brand">
+        <svg viewBox="0 0 44 44" aria-hidden="true"><rect width="44" height="44" rx="11" fill="#2563EB"/><path d="m22 8 11 5v9c0 7.5-4.8 13.2-11 15-6.2-1.8-11-7.5-11-15v-9l11-5Z" fill="#fff" fill-opacity=".18" stroke="#fff" stroke-width="2"/><path d="m17 22.5 3.5 3.5 7-7.5" fill="none" stroke="#fff" stroke-linecap="round" stroke-linejoin="round" stroke-width="3"/></svg>
+        <span><small>Единое окно</small><b>Документ-экспресс</b></span>
+      </div>
+    </div>`;
+  }
+  function floor1PassportRows(p) {
+    if (!p) return `<div class="floor1-empty">После подписи приложите паспорт: данные считываются с MRZ и NFC, язык талона определяется автоматически.</div>`;
+    const src = p.source === "chip" ? "NFC + MRZ" : p.source === "mrz" ? "MRZ" : p.source === "ocr" ? "OCR" : "демо";
+    return `<div class="floor1-passport-result">
+      <div class="floor1-result-heading"><span class="status-dot ok"></span><b>Паспорт считан</b><span class="floor1-source">${esc(src)}</span></div>
+      <dl class="floor1-data"><dt>Фамилия, имя</dt><dd>${esc(p.surname)} ${esc(p.given)}</dd><dt>Гражданство</dt><dd>${esc(p.country_name)} · ${esc(p.country)}</dd><dt>Номер</dt><dd>${esc(p.number)}</dd><dt>Дата рождения</dt><dd>${esc(p.dob)}</dd><dt>Действует до</dt><dd>${esc(p.expiry)}</dd><dt>Язык талона</dt><dd>${esc(LANGS[S.floor1.lang] || S.floor1.lang)} · определён автоматически</dd></dl>
+      ${(p.checks || []).length ? `<div class="floor1-checks">${p.checks.map((x) => `<span>✓ ${esc(x)}</span>`).join("")}</div>` : ""}
+      <p class="floor1-footnote">На 1-м этаже показана только латиница из паспорта. Проверка кириллицы и ручные правки выполняются оператором на 2-м этаже.</p>
+    </div>`;
+  }
+  function floor1TicketPreview(t) {
+    if (!t) return `<div class="floor1-ticket-wait"><div class="ticket-placeholder">A</div><h3>Талон появится здесь</h3><p>После согласия и сканирования паспорта система выпустит талон с QR без персональных данных.</p></div>`;
+    return `<div class="floor1-ticket-paper"><div class="floor1-ticket-kicker">Талон электронной очереди</div><div class="floor1-ticket-number">${esc(t.number)}</div><div class="floor1-qr">${qrSvg(t.qr)}</div><p class="floor1-ticket-route">${esc(t.print.route)}</p><p class="floor1-ticket-valid">${esc(t.print.valid)}</p><div class="floor1-ticket-meta">${esc(LANGS[S.floor1.lang] || S.floor1.lang)} · ${canPrint() ? esc(N.printerName()) : "печать не подключена"}</div></div>`;
+  }
+  function renderFloor1() {
+    const v = S.floor1, p = v && v.passport, ticket = S.floor1Ticket;
+    const consentCls = floor1ConsentDone() ? "done" : "active";
+    const passportCls = floor1PassportDone() ? "done" : floor1ConsentDone() ? "active" : "locked";
+    const ticketCls = floor1TicketIssued() ? "done" : floor1PassportDone() ? "active" : "locked";
+    const issueNotice = ticket ? (S.printErr ? `<div class="floor1-alert warn"><b>Талон создан, но не напечатан.</b> ${esc(S.printErr)}. Устраните проблему и нажмите «Далее» для повторной печати.</div>` : `<div class="floor1-alert success"><b>Талон готов.</b> Передайте его клиенту и направьте на 2-й этаж. Приёмная зарегистрирует QR без повторного ввода паспорта.</div>`) : (v && v.ticket ? `<div class="floor1-alert warn"><b>Талон уже создан.</b> Нажмите «Далее», чтобы получить данные для повторной печати.</div>` : "");
+    $("root").innerHTML = `<div class="floor1-app">
+      <header class="floor1-header">${floor1Brand()}<div class="floor1-header-right"><span class="floor1-role">Агент 1 этажа · Прилёт</span><div class="status-list"><span class="status-item ${S.online ? "on" : "off"}"><i></i>${S.online ? "Связь с сервером" : "Нет связи"}</span><span class="status-item ${canPrint() ? "on" : "off"}"><i></i>${canPrint() ? "MPRINT E200 готов" : "Принтер не подключён"}</span></div><button class="btn floor1-logout" data-act="logout">Выйти</button></div></header>
+      ${S.me.demo_scan || isDemoBuild() ? `<div class="floor1-demo">Учебный режим: используются вымышленные данные и демо-сканер. Реальные паспорта не вводить.</div>` : ""}
+      <main class="floor1-content">
+        <section class="floor1-intro" id="floor1-intro"><div><span class="floor1-eyebrow">Документы без лишних действий</span><h1>Оформление клиента в зоне прилёта</h1><p>Согласие → паспорт → талон → второй этаж. Услуги, банк и дальнейшее оформление выбираются вместе с оператором в офисе.</p></div><ol class="floor1-progress" aria-label="Шаги оформления"><li class="${v ? "done" : "current"}"><b>1</b><span>Клиент</span></li><li class="${consentCls}"><b>2</b><span>Согласие</span></li><li class="${passportCls}"><b>3</b><span>Паспорт</span></li><li class="${ticketCls}"><b>4</b><span>Талон</span></li></ol></section>
+        <div class="floor1-layout"><div class="floor1-workflow">
+          <section class="floor1-card ${v ? "done" : "active"}"><div class="floor1-card-number">1</div><div class="floor1-card-body"><div class="floor1-card-head"><div><span class="floor1-eyebrow">Новый клиент</span><h2>Подготовьте паспорт</h2></div><span class="floor1-state">${v ? "Карточка открыта" : "Ожидает начала"}</span></div><p>На первом этаже агент создаёт только защищённое pre-case. Выбор услуг и банков не отвлекает клиента в зоне багажа.</p>${v ? `<div class="floor1-case-ref">Номер обращения <b>${esc(v.number)}</b> · данные сохраняются только после подписанного согласия</div>` : `<div class="floor1-case-ref">Нажмите «Далее», чтобы открыть карточку клиента.</div>`}</div></section>
+          <section class="floor1-card ${consentCls}" id="floor1-consent"><div class="floor1-card-number">2</div><div class="floor1-card-body"><div class="floor1-card-head"><div><span class="floor1-eyebrow">152-ФЗ</span><h2>Согласие на обработку данных</h2></div><span class="floor1-state">${floor1ConsentDone() ? "Подписано S Pen" : "Требуется подпись"}</span></div><p>${floor1ConsentDone() ? "Согласие сохранено в зашифрованном деле. Сканирование паспорта разрешено." : "Передайте планшет клиенту. Он увидит только юридический текст и поле подписи; касание пальцем не принимается."}</p>${floor1ConsentDone() ? `<div class="floor1-ok-line"><span class="status-dot ok"></span>Подпись подтверждена. Сканер разблокирован.</div>` : `<button class="btn floor1-inline-action" data-act="floor1Consent" ${v ? "" : "disabled"}>Передать клиенту для подписи S Pen</button>`}</div></section>
+          <section class="floor1-card ${passportCls}" id="floor1-passport"><div class="floor1-card-number">3</div><div class="floor1-card-body"><div class="floor1-card-head"><div><span class="floor1-eyebrow">OCR · MRZ · NFC</span><h2>Пре-скан паспорта</h2></div><span class="floor1-state">${floor1PassportDone() ? "Данные считаны" : floor1ConsentDone() ? "Готов к сканированию" : "Заблокировано"}</span></div>${floor1PassportRows(p)}${floor1PassportDone() && !floor1TicketIssued() ? `<button class="btn floor1-inline-action" data-act="floor1Scan">Пересканировать паспорт</button>` : ""}</div></section>
+        </div><aside class="floor1-ticket-panel" id="floor1-ticket"><div class="floor1-ticket-panel-head"><div><span class="floor1-eyebrow">4 · 58 мм</span><h2>Талон на 2-й этаж</h2></div><span class="floor1-printer-tag">MERTECH MPRINT E200</span></div>${floor1TicketPreview(ticket)}${issueNotice}</aside></div>
+      </main>
+      <nav class="floor1-actionbar" aria-label="Основные действия"><div class="floor1-action-group left"><button class="btn floor1-action scan" data-act="floor1Scan" ${!floor1ConsentDone() || floor1TicketIssued() ? "disabled" : ""}>Сканировать OCR <kbd>F2</kbd></button><button class="btn floor1-action back" data-act="floor1Back">Назад</button></div><div class="floor1-action-status">${floor1NextHint()}<small>Tab — фокус · F2 — OCR · Enter — далее</small></div><div class="floor1-action-group right"><button class="btn floor1-action client" data-act="floor1Consent" ${!v || floor1ConsentDone() ? "disabled" : ""}>Передать клиенту</button><button class="btn floor1-action next" data-act="floor1Next">Далее <span>→</span></button></div></nav>
+    </div>`;
+  }
+  async function floor1Start() {
+    S.floor1 = await api("POST", "/api/v1/floor1/cases");
+    S.floor1Ticket = null; S.floor1TicketKey = null; S.floor1TicketPrinted = false; S.printErr = null;
+    toast("Карточка клиента открыта. Передайте планшет для подписи согласия.");
+  }
+  function floor1ConsentModal() {
+    if (!S.floor1) { toast("Сначала откройте карточку клиента", true); return; }
+    if (floor1ConsentDone()) { toast("Согласие уже подписано"); return; }
+    const texts = S.floor1Texts.filter((t) => t.recipient === "simpad");
+    if (!texts.length) { toast("Нет утверждённого текста согласия — обратитесь к администратору", true); return; }
+    const pick = (id) => texts.find((t) => String(t.id) === String(id)) || texts[0];
+    let t = texts[0];
+    modal(`<h3>Согласие на обработку данных</h3>${texts.length > 1 ? `<div class="field"><label for="f1ctT">Получатель</label><select id="f1ctT">${texts.map((x) => `<option value="${x.id}">${esc(x.legal_name)}</option>`).join("")}</select></div>` : ""}<div id="f1ctBody">${consentBody(t)}</div><div class="field"><label for="f1ctL">Язык, на котором текст объяснён клиенту</label><select id="f1ctL">${Object.entries(LANGS).map(([k, n]) => `<option value="${k}">${n}</option>`).join("")}</select></div><p class="est">Клиентский режим принимает только подпись стилусом S Pen. Экран вернётся сотруднику только после ПИН.</p><div class="row end"><button class="btn" id="f1No">Отмена</button><button class="btn primary" id="f1Client">Передать планшет клиенту</button></div>`, (close) => {
+      if ($("f1ctT")) $("f1ctT").onchange = () => { t = pick($("f1ctT").value); $("f1ctBody").innerHTML = consentBody(t); };
+      $("f1No").onclick = close;
+      $("f1Client").onclick = () => { const lang = $("f1ctL").value; close(); clientMode(S.floor1, "simpad", t, lang, async (evidence) => api("POST", `/api/v1/floor1/cases/${S.floor1.id}/consents`, { recipient: "simpad", text_id: t.id, method: "stylus", explained_lang: lang, evidence_mime: evidence.mime, evidence_b64: evidence.b64 })); };
+    }, true);
+  }
+  async function floor1ScanPassport() {
+    if (!S.floor1 || !floor1ConsentDone()) { toast("Сначала получите подпись согласия 152-ФЗ", true); return; }
+    if (floor1TicketIssued()) { toast("Талон уже выпущен. Изменение паспорта выполняется оператором на 2-м этаже.", true); return; }
+    const passport = await scan("passport");
+    S.floor1 = await api("PUT", `/api/v1/floor1/cases/${S.floor1.id}/scan`, { passport });
+    toast("Паспорт считан. Язык талона определён автоматически.");
+  }
+  async function floor1PrintTicket() {
+    if (!S.floor1Ticket) return;
+    S.printErr = null;
+    if (!canPrint()) { S.printErr = "Поясной принтер MERTECH MPRINT E200 не подключён"; return; }
+    await printAndMark(S.floor1Ticket);
+    if (!S.printErr) { S.floor1TicketPrinted = true; toast(`Талон ${S.floor1Ticket.number} напечатан. Направьте клиента на 2-й этаж.`); }
+  }
+  async function floor1IssueTicket() {
+    if (!S.floor1 || !floor1ConsentDone() || !floor1PassportDone()) { toast("Для талона нужны подписанное согласие и скан паспорта", true); return; }
+    const key = S.floor1TicketKey || `f1-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+    S.floor1TicketKey = key;
+    const result = await api("POST", `/api/v1/floor1/cases/${S.floor1.id}/ticket`, null, { "Idempotency-Key": key });
+    S.floor1 = result.case; S.floor1Ticket = result.ticket;
+    await floor1PrintTicket();
+  }
+  function floor1Next() {
+    if (!S.floor1) { act(floor1Start); return; }
+    if (!floor1ConsentDone()) { floor1ConsentModal(); return; }
+    if (!floor1PassportDone()) { act(floor1ScanPassport); return; }
+    if (!S.floor1Ticket) { act(floor1IssueTicket); return; }
+    if (S.printErr) { act(floor1PrintTicket); return; }
+    S.floor1 = null; S.floor1Ticket = null; S.floor1TicketKey = null; S.floor1TicketPrinted = false; S.printErr = null; render();
+  }
+  window.__floor1Action = function (action) {
+    if (!S.me || S.me.role !== "floor1" || action !== "scan") return;
+    act(floor1ScanPassport);
+  };
+
   /* Приёмная офиса: сканер QR работает как клавиатура — вводит цифры и Enter. */
   function renderReception() {
     const q = S.q || { waiting: [], called: [], serving: [], bank: [], on_the_way: 0 };
     const r = S.ckRes;
     $("root").innerHTML = `<div class="bar"><div class="brand"><b>Единое окно</b><span>Приёмная · ${esc(S.me.device)} · ${esc(S.me.operator.name)}</span></div>
-        <div class="clock"><span class="chip ${S.online ? "on" : "off"}"><i></i>${S.online ? "Связь есть" : "Нет связи"}</span><button class="btn small" data-act="logout">Выйти</button></div></div>
+        <div class="clock"><span class="status-item ${S.online ? "on" : "off"}"><i></i>${S.online ? "Связь есть" : "Нет связи"}</span><button class="btn small" data-act="logout">Выйти</button></div></div>
       <div class="hall">
         <section class="panel"><h2>Талон клиента</h2>
           <div class="field"><label for="ckIn">Отсканируйте QR талона или введите номер</label><input id="ckIn" class="bigin" autocomplete="off" placeholder="А317"></div>
@@ -635,7 +759,7 @@
     document.body.classList.remove("client");
     const cr = $("clientRoot"); if (cr) cr.innerHTML = "";
   }
-  function clientMode(v, r, t, lang) {
+  function clientMode(v, r, t, lang, onSubmit) {
     const cr = $("clientRoot");
     document.body.classList.add("client");
     let evidence = null;
@@ -665,7 +789,10 @@
         exitClientMode();
         if (!evidence) { toast("Подпись не сохранена: клиент не подписал или истекло время. Повторите.", true); render(); return; }
         act(async () => {
-          setView(await api("POST", `/api/v1/cases/${v.id}/consents`, { recipient: r, text_id: t.id, method: "stylus", explained_lang: lang, evidence_mime: evidence.mime, evidence_b64: evidence.b64 }));
+          const data = onSubmit
+            ? await onSubmit(evidence)
+            : await api("POST", `/api/v1/cases/${v.id}/consents`, { recipient: r, text_id: t.id, method: "stylus", explained_lang: lang, evidence_mime: evidence.mime, evidence_b64: evidence.b64 });
+          if (onSubmit) S.floor1 = data; else setView(data);
           toast("Согласие сохранено");
         });
       };
@@ -842,7 +969,7 @@
     async newCase() { const v = await api("POST", "/api/v1/cases"); setView(v); S.tab = "cs"; S.memo = null; S.memoLang = null; S.cases = await api("GET", "/api/v1/cases"); S.shift = await api("GET", "/api/v1/reports/shift"); },
     async open(el) {
       S.sel = el.dataset.id; const v = S.view = await api("GET", "/api/v1/cases/" + S.sel);
-      S.tab = !hasConsent(v, "simpad") ? "cs" : !v.passport ? "scan" : !v.bank_id ? "pkg" : !hasConsent(v, "bank") ? "consent" : "route";
+      S.tab = firstIncompleteTab(v);
       S.memo = null; S.memoLang = null;
     },
     async tab(el) { S.tab = el.dataset.tab; if (S.tab === "memo") await loadMemo(); },
@@ -886,12 +1013,16 @@
     async tNoshow(el) { await api("POST", `/api/v1/tickets/${el.dataset.id}/noshow`); S.q = await api("GET", "/api/v1/queue"); },
     async tStart(el) {
       const v = await api("POST", `/api/v1/tickets/${el.dataset.id}/start`);
-      setView(v); S.tab = "cs"; S.memo = null; S.memoLang = null;
+      setView(v); S.tab = firstIncompleteTab(v); S.memo = null; S.memoLang = null;
       [S.cases, S.q] = await Promise.all([api("GET", "/api/v1/cases"), api("GET", "/api/v1/queue")]);
     },
-    async toBank() { await api("POST", `/api/v1/cases/${S.sel}/to-bank`); await refreshCase(); toast("Клиент вызван к окну банка"); }
+    async toBank() { await api("POST", `/api/v1/cases/${S.sel}/to-bank`); await refreshCase(); toast("Клиент вызван к окну банка"); },
+    floor1Consent() { floor1ConsentModal(); },
+    async floor1Scan() { await floor1ScanPassport(); },
+    floor1Back() { floor1Back(); },
+    floor1Next() { floor1Next(); }
   };
-  const DIRECT = new Set(["saveCfg", "toSetup", "toLogin", "login", "fix", "claim", "consentStart", "manualHandoff", "pickPrinter", "testPrint", "markDone", "markFail"]);
+  const DIRECT = new Set(["saveCfg", "toSetup", "toLogin", "login", "fix", "claim", "consentStart", "manualHandoff", "pickPrinter", "testPrint", "markDone", "markFail", "floor1Consent", "floor1Back", "floor1Next"]);
   document.addEventListener("click", (e) => {
     S.lastAction = Date.now();
     const el = e.target.closest("[data-act]"); if (!el || el.disabled) return;
@@ -901,6 +1032,7 @@
   });
   document.addEventListener("keydown", (e) => {
     S.lastAction = Date.now();
+    if (e.key === "F2" && S.me && S.me.role === "floor1") { e.preventDefault(); window.__floor1Action("scan"); return; }
     if (e.key === "Enter" && $("lgP") && document.activeElement === $("lgP")) handlers.login();
     if (e.key === "Enter" && $("ckIn") && document.activeElement === $("ckIn")) { e.preventDefault(); act(doCheckin); }
   });
@@ -917,7 +1049,7 @@
       if (!S.session) return;
       if (Date.now() - S.lastAction > IDLE_MS) { handlers.logout(); return; }
       if (S.busy || !S.me || document.getElementById("scrim") || document.body.classList.contains("client")) return;
-      if (S.me.role === "hall") return;
+      if (S.me.role === "hall" || S.me.role === "floor1") return;
       // не перерисовываем, пока сотрудник набирает номер талона
       if ($("ckIn") && document.activeElement === $("ckIn") && $("ckIn").value) return;
       const jobs = [api("GET", "/api/v1/queue").then((q) => { S.q = q; })];

@@ -27,11 +27,11 @@ from .crypto import (DataCipher, bank_canonical, consteq, hash_pin, hmac_hex, ne
                      verify_pin)
 from .db import init_db, make_engine, make_sessionmaker
 from .models import (Audit, Bank, BankNonce, Case, Consent, ConsentText, Correction, Device, DocPolicy, HandoffToken,
-                     Operator, OperatorClaim, RejectedEvent, Session, Setting, Stand, Step)
+                     Operator, OperatorClaim, RejectedEvent, Session, Setting, Stand, Step, Ticket)
 from .queue import SERIES, Queue
 from .services import Svc, aware
 
-VERSION = "0.2.8"
+VERSION = "0.3.0"
 MAX_SKEW_SEC = 300
 NONCE_RE = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
 IDEM_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
@@ -171,7 +171,7 @@ class StandIn(BaseModel):
     name: str = Field(max_length=200)
 
 
-Role = Literal["desk", "hall", "reception", "board"]
+Role = Literal["desk", "floor1", "hall", "reception", "board"]
 STATION_RE = r"^[0-9A-Za-z-]{0,8}$"
 SERIES_RE = r"^[" + SERIES + r"]?$"
 
@@ -346,8 +346,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # Что разрешено планшету каждой роли. Рабочее место (desk) — всё; табло — вход сотрудника не нужен вовсе.
     _common = r"/api/v1/(me|logout|reauth|tickets|tickets/[0-9a-f-]{36}/printed)"
+    _floor1_common = r"/api/v1/(me|logout|reauth|tickets/[0-9a-f-]{36}/printed)"
     ROLE_PATHS = {
         "hall": re.compile(rf"^{_common}$"),
+        # Агент 1-го этажа не видит банки, пакеты, маршруты, очередь, общий список дел
+        # или чужие pre-case. Ему доступны только согласие 152-ФЗ, пре-скан паспорта
+        # и выпуск талона для собственного обращения.
+        "floor1": re.compile(rf"^({_floor1_common}|/api/v1/floor1/consent-texts|/api/v1/floor1/cases(?:/[0-9a-f-]{{36}}(?:/(?:consents|scan|ticket))?)?)$"),
         "reception": re.compile(rf"^({_common}|/api/v1/tickets/checkin|/api/v1/queue|/api/v1/reports/queue)$"),
         "board": re.compile(r"^$"),  # табло не входит как сотрудник
     }
@@ -527,6 +532,65 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def consent_texts(_: Who = Depends(operator), sv: Svc = Depends(svc)):
         return sv.consent_texts()
 
+    def floor1_case(case_id: str, w: Who, sv: Svc) -> Case:
+        """Pre-case виден только тому планшету 1-го этажа, который его создал."""
+        c = sv.get_case(case_id, w.stand_id)
+        if w.device.role != "floor1" or c.floor1_device_id != w.device.id:
+            raise HTTPException(404, "Обращение первого этажа не найдено")
+        return c
+
+    def floor1_view(c: Case, sv: Svc) -> dict:
+        """Минимальная проекция дела для 1-го этажа: без кириллицы и офисных данных."""
+        p = sv.c.dec(c.passport_enc) or {}
+        passport = None if not p else {
+            "surname": p.get("surname", ""), "given": p.get("given", ""),
+            "country": p.get("country", ""), "country_name": p.get("country_name", ""),
+            "number": p.get("number", ""), "dob": p.get("dob", ""), "expiry": p.get("expiry", ""),
+            "source": p.get("source", ""), "checks": p.get("checks", []),
+        }
+        return {"id": c.id, "number": c.number, "created_at": aware(c.created_at).isoformat(), "lang": c.lang,
+                "consent_signed": "simpad" in sv.active_consents(c), "passport": passport,
+                "ticket": sv._ticket(c)}
+
+    @app.get("/api/v1/floor1/consent-texts")
+    def floor1_consent_texts(_: Who = Depends(operator), sv: Svc = Depends(svc)):
+        """На 1-м этаже доступен только утверждённый текст согласия Единому окну."""
+        return [t for t in sv.consent_texts() if t["recipient"] == "simpad"]
+
+    @app.post("/api/v1/floor1/cases", status_code=201)
+    def create_floor1_case(w: Who = Depends(operator), sv: Svc = Depends(svc)):
+        c = sv.create_case(w.stand_id, w.actor)
+        c.floor1_device_id = w.device.id
+        sv.audit(w.actor, "floor1.case.open", c.id)
+        sv.db.flush()
+        return floor1_view(c, sv)
+
+    @app.get("/api/v1/floor1/cases/{case_id}")
+    def get_floor1_case(case_id: str, w: Who = Depends(operator), sv: Svc = Depends(svc)):
+        return floor1_view(floor1_case(case_id, w, sv), sv)
+
+    @app.post("/api/v1/floor1/cases/{case_id}/consents")
+    def floor1_consent(case_id: str, body: ConsentIn, w: Who = Depends(operator), sv: Svc = Depends(svc)):
+        c = floor1_case(case_id, w, sv)
+        if body.recipient != "simpad" or body.method != "stylus":
+            raise HTTPException(422, "На 1-м этаже доступно только согласие Единому окну, подписанное стилусом")
+        sv.grant_consent(c, body.model_dump(), w.actor, w.op.id)
+        sv.db.flush()
+        return floor1_view(c, sv)
+
+    @app.put("/api/v1/floor1/cases/{case_id}/scan")
+    def floor1_scan(case_id: str, body: ScanIn, w: Who = Depends(operator), sv: Svc = Depends(svc)):
+        c = floor1_case(case_id, w, sv)
+        if not body.passport or body.migcard:
+            raise HTTPException(422, "На 1-м этаже сканируется только паспорт")
+        if "simpad" not in sv.active_consents(c):
+            raise HTTPException(409, "Сначала согласие клиента на обработку данных — без него документы не сканируются")
+        if body.passport.source == "demo" and not settings.allow_demo_scan:
+            raise HTTPException(400, "Демо-сканер отключён на этом сервере. Нужен настоящий сканер документов")
+        sv.set_scan(c, body.passport.model_dump(), None, w.actor)
+        sv.db.flush()
+        return floor1_view(c, sv)
+
     @app.get("/api/v1/banks")
     def banks(_: Who = Depends(operator), sv: Svc = Depends(svc)):
         h = sv.hour_now()
@@ -660,6 +724,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def q(s: DbSession = Depends(db, scope="function")) -> Queue:
         return Queue(s, settings.tz, settings.data_key)
 
+    @app.post("/api/v1/floor1/cases/{case_id}/ticket", status_code=201)
+    def floor1_ticket(case_id: str, response: Response, w: Who = Depends(operator), sv: Svc = Depends(svc),
+                      idempotency_key: str = Header(default="")):
+        """Атомарно связывает подготовленное дело с талоном без ПДн для 2-го этажа."""
+        c = floor1_case(case_id, w, sv)
+        if "simpad" not in sv.active_consents(c) or not c.passport_enc:
+            raise HTTPException(409, "Для талона нужны согласие 152-ФЗ и скан паспорта")
+        if idempotency_key and not IDEM_RE.match(idempotency_key):
+            raise HTTPException(422, "Idempotency-Key: 8–64 символа [A-Za-z0-9_-]")
+        qu = Queue(sv.db, settings.tz, settings.data_key)
+        if c.ticket_id:
+            t = sv.db.get(Ticket, c.ticket_id)
+            if not t or t.issued_device_id != w.device.id:
+                raise HTTPException(409, "Талон этого обращения недоступен с данного планшета")
+            response.status_code = 200
+            return {"case": floor1_view(c, sv), "ticket": qu.ticket_out(t, qu.token(t)), "replay": True}
+        t, token, replay = qu.issue(w.device, w.op, c.lang, "floor1", w.actor, idempotency_key or None)
+        qu.attach(t, c, w.actor)
+        sv.audit(w.actor, "floor1.ticket.issue", c.id, t.number)
+        sv.db.flush()
+        if replay:
+            response.status_code = 200
+        return {"case": floor1_view(c, sv), "ticket": qu.ticket_out(t, token), "replay": replay}
+
     @app.post("/api/v1/tickets", status_code=201)
     def issue_ticket(body: TicketIn, response: Response, w: Who = Depends(operator), qu: Queue = Depends(q),
                      idempotency_key: str = Header(default="")):
@@ -701,8 +789,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """Клиент подошёл к стойке: открывается обращение, привязанное к талону. Язык берётся из талона."""
         qu = Queue(sv.db, settings.tz, settings.data_key)
         t = qu.claim(w.device, ticket_id)  # атомарно: второй запрос получит 409, обращение не создаётся
-        c = sv.create_case(w.stand_id, w.actor)
-        qu.attach(t, c, w.actor)
+        if t.case_id:
+            c = sv.get_case(t.case_id, w.stand_id)
+            sv.audit(w.actor, "floor1.case.arrive", c.id, t.number)
+        else:
+            c = sv.create_case(w.stand_id, w.actor)
+            qu.attach(t, c, w.actor)
         sv.db.flush()
         return sv.view(c)
 
@@ -774,10 +866,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "note": "Ключ показывается один раз. Вводится на планшете при настройке."}
 
     def _check_device(s: DbSession, dev_id: int | None, stand_id: str, role: str, station: str, series: str) -> None:
-        if role in ("hall", "reception") and not series:
-            raise HTTPException(422, f"Планшету выдачи талонов нужна серия — одна буква из {SERIES}")
-        if role == "desk" and series:
-            raise HTTPException(422, "Серия талонов задаётся только планшетам зала и приёмной")
+        if role in ("floor1", "hall", "reception") and not series:
+            raise HTTPException(422, "Для планшета 1-го этажа, зала или приёмной укажите серию талонов")
+        if role not in ("floor1", "hall", "reception") and series:
+            raise HTTPException(422, "Серия талонов задаётся только планшетам 1-го этажа, зала и приёмной")
         if series:
             other = s.scalar(select(Device).where(Device.stand_id == stand_id, Device.series == series,
                                                   Device.active.is_(True), Device.id != (dev_id or 0)))

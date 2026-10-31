@@ -2,6 +2,7 @@
 *.db
 __pycache__/
 .pytest_cache/
+.venv-preflight/
 android/.gradle/
 android/build/
 android/app/build/
