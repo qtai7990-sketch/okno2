@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" role="img" aria-label="Документ-экспресс">
+  <!-- Знак «Документ-экспресс»: документ в движении. Цвет — акцентный синий интерфейса #2563EB -->
+  <rect width="48" height="48" rx="11" fill="#2563EB"/>
+  <path d="M19 11h12.5L38 17.5V35a2 2 0 0 1-2 2H19a2 2 0 0 1-2-2V13a2 2 0 0 1 2-2z" fill="#FFFFFF"/>
+  <path d="M31.5 11v4.5a2 2 0 0 0 2 2H38z" fill="#BFD3FB"/>
+  <rect x="21" y="22" width="12" height="2.4" rx="1.2" fill="#2563EB"/>
+  <rect x="21" y="27" width="9" height="2.4" rx="1.2" fill="#2563EB"/>
+  <rect x="21" y="32" width="6" height="2.4" rx="1.2" fill="#93B4F6"/>
+  <rect x="7" y="18" width="7" height="2.4" rx="1.2" fill="#FFFFFF"/>
+  <rect x="5" y="23.5" width="9" height="2.4" rx="1.2" fill="#FFFFFF" opacity=".75"/>
+  <rect x="8" y="29" width="6" height="2.4" rx="1.2" fill="#FFFFFF" opacity=".5"/>
+</svg>

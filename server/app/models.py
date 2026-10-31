@@ -29,10 +29,10 @@ class Device(Base):
     name: Mapped[str] = mapped_column(String(200))
     key_hash: Mapped[str] = mapped_column(String(64), unique=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
-    # desk — рабочее место; floor1 — агент 1-го этажа; hall — зал; reception — приёмная; board — табло
+    # desk — рабочее место оформления; hall — выдача талонов в зале; reception — приёмная офиса; board — табло
     role: Mapped[str] = mapped_column(String(12), default="desk")
     station: Mapped[str] = mapped_column(String(8), default="")  # номер стойки для вызова (desk)
-    series: Mapped[str] = mapped_column(String(1), default="")  # буква серии талонов (floor1, hall, reception)
+    series: Mapped[str] = mapped_column(String(1), default="")  # буква серии талонов (hall, reception)
 
 
 class Operator(Base):
@@ -137,9 +137,6 @@ class Case(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     number: Mapped[str] = mapped_column(String(16), unique=True)
     stand_id: Mapped[str] = mapped_column(ForeignKey("stands.id"))
-    # Pre-case создаётся только планшетом агента 1-го этажа. Поле ограничивает
-    # узкий API этого устройства его собственными незавершёнными обращениями.
-    floor1_device_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     lang: Mapped[str] = mapped_column(String(4), default="ru")

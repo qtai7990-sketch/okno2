@@ -1,5 +1,4 @@
 """Электронная очередь: талон в зале → приёмная → вызов на табло → обслуживание → окно банка."""
-import base64
 import threading
 
 import pytest
@@ -21,13 +20,13 @@ def q(tmp_path, monkeypatch):
     c = TestClient(create_app(settings(tmp_path)))
     monkeypatch.setattr("app.services.Svc.hour_now", lambda self: 12.0)
     assert c.post("/admin/v1/stands", json={"id": "zia", "name": "Жуковский"}, headers=ADMIN).status_code == 200
-    for code in ("floor1", "hall1", "hall2", "rec1", "desk7", "desk8"):
+    for code in ("hall1", "hall2", "rec1", "desk7", "desk8"):
         assert c.post("/admin/v1/operators", headers=ADMIN, json={"stand_id": "zia", "code": code, "name": code,
                                                                    "pin": "246810"}).status_code == 200
-    d = {"floor1": dev(c, "Агент 1 этажа", "floor1", series="E"), "hall1": dev(c, "Зал 1", "hall", series="A"), "hall2": dev(c, "Зал 2", "hall", series="B"),
+    d = {"hall1": dev(c, "Зал 1", "hall", series="A"), "hall2": dev(c, "Зал 2", "hall", series="B"),
          "rec": dev(c, "Приёмная", "reception", series="P"), "desk7": dev(c, "Стойка 7", "desk", station="7"),
          "desk8": dev(c, "Стойка 8", "desk", station="8"), "board": dev(c, "Табло", "board")}
-    h = {"floor1": login(c, d["floor1"]["device_key"], "floor1"), "hall1": login(c, d["hall1"]["device_key"], "hall1"), "hall2": login(c, d["hall2"]["device_key"], "hall2"),
+    h = {"hall1": login(c, d["hall1"]["device_key"], "hall1"), "hall2": login(c, d["hall2"]["device_key"], "hall2"),
          "rec": login(c, d["rec"]["device_key"], "rec1"), "desk7": login(c, d["desk7"]["device_key"], "desk7"),
          "desk8": login(c, d["desk8"]["device_key"], "desk8"), "board": {"X-Device-Key": d["board"]["device_key"]}}
     return {"c": c, "d": d, "h": h}
@@ -66,46 +65,6 @@ def test_roles_are_enforced(q):
     assert c.post("/api/v1/login", json={"code": "desk7", "pin": "246810"}, headers=h["board"]).status_code == 403
     assert c.get("/api/v1/board", headers=h["board"]).status_code == 200
     assert c.get("/api/v1/board", headers={"X-Device-Key": q["d"]["hall1"]["device_key"]}).status_code == 403
-    assert c.get("/api/v1/cases", headers=h["floor1"]).status_code == 403
-    assert c.post("/api/v1/tickets", json={"lang": "ru"}, headers=h["floor1"]).status_code == 403
-
-
-def test_floor1_pre_case_reaches_second_floor_without_duplicate(q):
-    """У агента 1-го этажа только его pre-case, паспортная латиница и талон без ПДн."""
-    from tests.test_flow import PASSPORT, PNG
-
-    c, h = q["c"], q["h"]
-    text_id = add_text(c, "simpad")
-    assert c.get("/api/v1/floor1/consent-texts", headers=h["floor1"]).json()[0]["id"] == text_id
-    opened = c.post("/api/v1/floor1/cases", headers=h["floor1"])
-    assert opened.status_code == 201, opened.text
-    pre = opened.json()
-    assert pre["passport"] is None and pre["consent_signed"] is False and "cyr" not in pre
-    cid = pre["id"]
-    assert c.post(f"/api/v1/floor1/cases/{cid}/consents", headers=h["floor1"], json={
-        "recipient": "simpad", "text_id": text_id, "method": "stylus", "explained_lang": "ru",
-        "evidence_mime": "image/png", "evidence_b64": base64.b64encode(PNG).decode()}).status_code == 200
-    scan = c.put(f"/api/v1/floor1/cases/{cid}/scan", headers=h["floor1"], json={"passport": PASSPORT})
-    assert scan.status_code == 200, scan.text
-    preview = scan.json()
-    assert preview["passport"]["surname"] == "RAKHIMOV" and "cyr" not in preview["passport"]
-    assert c.put(f"/api/v1/floor1/cases/{cid}/scan", headers=h["floor1"], json={"passport": PASSPORT, "migcard": {}}).status_code == 422
-    first = c.post(f"/api/v1/floor1/cases/{cid}/ticket", headers={**h["floor1"], "Idempotency-Key": "floor1-ticket-0001"})
-    assert first.status_code == 201, first.text
-    out = first.json()
-    ticket = out["ticket"]
-    assert ticket["number"] == "Е001" and ticket["source"] == "floor1" and not {"name", "passport", "phone"} & set(ticket)
-    replay = c.post(f"/api/v1/floor1/cases/{cid}/ticket", headers={**h["floor1"], "Idempotency-Key": "floor1-ticket-0002"})
-    assert replay.status_code == 200 and replay.json()["ticket"]["id"] == ticket["id"] and replay.json()["replay"] is True
-    assert c.post(f"/api/v1/tickets/{ticket['id']}/printed", headers=h["floor1"]).status_code == 200
-    assert c.post("/api/v1/tickets/checkin", json={"code": ticket["qr"]}, headers=h["rec"]).status_code == 200
-    called = c.post("/api/v1/queue/next", headers=h["desk7"]).json()
-    arrived = c.post(f"/api/v1/tickets/{called['id']}/start", headers=h["desk7"])
-    assert arrived.status_code == 201, arrived.text
-    case = arrived.json()
-    assert case["id"] == cid and case["ticket"]["number"] == "Е001" and case["passport"]["cyr"] == "Рахимов Фаррух"
-    report = c.get("/api/v1/reports/queue", headers=h["rec"]).json()
-    assert report["issued_floor1"] == 1 and report["printed_floor1"] == 1
 
 
 def test_queue_order_is_by_arrival_not_by_number(q):
